@@ -14,3 +14,8 @@ This repository is research-first. Future Codex work must follow these rules:
 10. Do not add live-trading functionality unless an implementation packet explicitly authorizes it.
 11. Do not add infrastructure or technologies merely because they may be useful later.
 12. Keep documentation synchronized whenever implementation changes an established design decision.
+13. Treat research traceability as part of correctness. For consequential behaviour, verify that the implementation packet points to the governing research/design evidence and that the code does not claim more than that evidence supports.
+14. Do not convert a literature-inspired idea into an implementation rule unless the project documentation explicitly identifies the adaptation or project-derived step.
+15. If implementation reveals that an authoritative source is ambiguous, stale, incompatible with current platform behaviour, or insufficient for the requested behaviour, stop and report the evidence gap rather than selecting an interpretation silently.
+16. Do not tune unresolved numerical parameters from outcome data unless a documented experimental protocol explicitly authorizes that procedure.
+17. For mutable external behaviour such as Polymarket APIs, fees, order semantics, or restrictions, rely on the project-designated authoritative documentation and verification date. If implementation requires fresher verification than the docs provide, flag it before proceeding.
