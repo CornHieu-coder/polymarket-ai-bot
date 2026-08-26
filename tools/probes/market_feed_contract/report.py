@@ -7,6 +7,13 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+Q8_DELAY_LIMITATION = (
+    "probe-observed source-to-processing delay contaminated by local clock offset, "
+    "event-loop scheduling, socket/library buffering, backpressure, and synchronous "
+    "flush/fsync durable-persistence overhead; not a venue/network latency estimate."
+)
+
+
 def _cell(value: Any) -> str:
     return str(value).replace("|", "\\|").replace("\n", " ")
 
@@ -17,6 +24,59 @@ def _json(value: Any) -> str:
 
 def _status_line(question: str, section: Mapping[str, Any], conclusion: str) -> str:
     return f"| {question} | **{section['status']}** | {_cell(conclusion)} |"
+
+
+def _delay_metrics(q8: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return delay metrics from either the historical or corrective schema."""
+
+    value = q8.get("probe_observed_source_to_processing_delay_ms")
+    if isinstance(value, Mapping):
+        return value
+    value = q8.get("delay_ms_local_clock_dependent")
+    if isinstance(value, Mapping):
+        return value
+    return {}
+
+
+def _display(value: Any, *, default: str = "not recorded") -> str:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return str(value).lower()
+    return str(value)
+
+
+def _subscription_payload(run: Mapping[str, Any]) -> Mapping[str, Any]:
+    for key in ("subscription_payload", "market_subscription_payload"):
+        value = run.get(key)
+        if isinstance(value, Mapping):
+            return value
+    return {}
+
+
+def _subscription_fields(run: Mapping[str, Any]) -> list[Any]:
+    for key in ("subscription_fields", "market_subscription_fields"):
+        value = run.get(key)
+        if isinstance(value, (list, tuple)):
+            return list(value)
+    return []
+
+
+def _subscription_setting(run: Mapping[str, Any], name: str) -> str:
+    sent_key = f"{name}_field_sent"
+    legacy_key = "websocket_level" if name == "level" else name
+    if sent_key in run:
+        if run[sent_key]:
+            payload = _subscription_payload(run)
+            if name in payload:
+                return f"sent explicitly as `{_cell(payload[name])}`"
+            if legacy_key in run:
+                return f"sent explicitly as `{_cell(run[legacy_key])}`"
+            return "sent explicitly"
+        return "omitted; documented default relied upon"
+    if legacy_key in run:
+        return f"`{_cell(_display(run[legacy_key]))}` (explicit)"
+    return "not recorded"
 
 
 def _q_conclusions(summary: Mapping[str, Any]) -> list[str]:
@@ -71,12 +131,12 @@ def _q_conclusions(summary: Mapping[str, Any]) -> list[str]:
         )
         + "."
     )
-    delays = q8["delay_ms_local_clock_dependent"]
+    delays = _delay_metrics(q8)
     q8_text = (
         f"Measured {q8['timestamped_events']} timestamped events; "
         f"regressions={q8['source_timestamp_regressions']}, future-source="
         f"{q8['source_after_local_receive']}, local-clock-dependent p50 delay="
-        f"{delays['p50']} ms."
+        f"{delays.get('p50')} ms."
     )
     return [
         _status_line("Q1 — Current event schema", q1, q1_text),
@@ -163,8 +223,11 @@ def render_report(summary: Mapping[str, Any]) -> str:
         f"| Actual wall/monotonic duration | {run['actual_duration_seconds']} seconds |",
         f"| REST interval | {run['rest_interval_seconds']} seconds |",
         f"| Controlled reconnects | {run['controlled_reconnects']} |",
-        f"| Initial dump | `{str(run['initial_dump']).lower()}` (explicit) |",
-        f"| WebSocket level | {run['websocket_level']} |",
+        f"| Initial dump subscription field | {_subscription_setting(run, 'initial_dump')} |",
+        f"| WebSocket level subscription field | {_subscription_setting(run, 'level')} |",
+        f"| Subscription control | {_cell(_display(run.get('subscription_control')))} |",
+        f"| Subscription fields | `{_cell(_json(_subscription_fields(run)))}` |",
+        f"| Subscription payload | `{_cell(_json(_subscription_payload(run)))}` |",
         f"| Git commit captured | `{_cell(software.get('git_commit'))}` |",
         f"| Git worktree dirty at capture | `{str(software.get('git_dirty')).lower()}` |",
         f"| Python | `{software['python']}` |",
@@ -178,6 +241,17 @@ def render_report(summary: Mapping[str, Any]) -> str:
         "",
     ]
     lines.extend(f"- `{token}`" for token in run["token_ids"])
+    if run.get("baseline_run_id") is not None:
+        lines.extend(
+            [
+                "",
+                "Corrective-run baseline provenance:",
+                "",
+                f"- Baseline run ID: `{_cell(run['baseline_run_id'])}`",
+                f"- Baseline summary path: `{_cell(_display(run.get('baseline_summary_path')))}`",
+                f"- Baseline summary SHA-256: `{_cell(_display(run.get('baseline_summary_sha256')))}`",
+            ]
+        )
     lines.extend(
         [
             "",
@@ -285,6 +359,14 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "A token/session without a later delta can confirm receipt of a fresh snapshot "
             "but cannot fully exercise snapshot-before-delta precedence.",
             "",
+            _display(
+                q2.get("scope_note"),
+                default=(
+                    "Reconnect evidence is bounded to the sampled sessions and tokens; "
+                    "it is not a universal server guarantee."
+                ),
+            ),
+            "",
         ]
     )
 
@@ -300,7 +382,7 @@ def render_report(summary: Mapping[str, Any]) -> str:
             f"| Excluded price-change entries | {q3['excluded_change_entries']} |",
             f"| Best bid/ask comparisons | {q3['comparison_entries']} |",
             f"| Exact best bid/ask matches | {q3['exact_matches']} |",
-            f"| Best bid/ask mismatches | {q3['mismatches']} |",
+            f"| Best bid/ask mismatches | {q3.get('genuine_mismatches', q3.get('mismatches', 0))} |",
             f"| Direct single-entry mismatches | {q3['direct_single-entry_mismatches']} |",
             f"| Non-zero updates | {q3['nonzero_replacements']} |",
             f"| Zero-size updates | {q3['zero_size_updates']} |",
@@ -309,6 +391,7 @@ def render_report(summary: Mapping[str, Any]) -> str:
             f"| Discriminating zero deletions | {q3['discriminating_zero_deletes']} |",
             f"| Independently validated zero deletions | {q3['independently_validated_zero_deletes']} |",
             f"| Idempotent replacements/deletions | {q3['idempotent_replacements']} |",
+            f"| Superseded before independent validation | {q3.get('superseded_before_validation', 0)} |",
             "",
             q3["validation_note"],
             "",
@@ -317,6 +400,73 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "",
         ]
     )
+    component_statuses = q3.get("component_statuses")
+    if isinstance(component_statuses, Mapping):
+        lines.extend(
+            [
+                f"Component conclusions: `{_json(component_statuses)}`.",
+                "",
+            ]
+        )
+    empty_side = q3.get("empty_side_boundary_interpretation")
+    if isinstance(empty_side, Mapping):
+        lines.extend(
+            [
+                "#### Empty-side boundary observations",
+                "",
+                f"Bounded interpretation status: **{_display(empty_side.get('status'), default='UNRESOLVED')}**.",
+                "",
+                f"Observed candidates: **{_display(empty_side.get('observed_candidates'), default='0')}**; "
+                f"confirmed candidates: **{_display(empty_side.get('confirmed_candidates'), default='0')}**; "
+                f"unresolved candidates: **{_display(empty_side.get('unresolved_candidates'), default='0')}**; "
+                f"targeted REST requests lacking alignment: **{_display(empty_side.get('targeted_rest_unaligned'), default='0')}**.",
+                "",
+                f"Observed candidate kinds: `{_json(empty_side.get('observed_kinds', {}))}`; "
+                f"confirmed kinds: `{_json(empty_side.get('confirmed_kinds', {}))}`.",
+                "",
+                f"Targeted REST diagnostics: `{_json(empty_side.get('targeted_rest_diagnostics', {}))}`.",
+                "",
+                _display(
+                    empty_side.get("scope"),
+                    default=(
+                        "Any interpretation applies only to aligned observations in this "
+                        "bounded run. Numeric 0/1 values are not asserted to be universal "
+                        "empty-side protocol sentinels."
+                    ),
+                ),
+                "",
+                "Numeric `best_bid=0` or `best_ask=1` observations are not claimed as "
+                "universal empty-side protocol semantics.",
+                "",
+            ]
+        )
+        candidates = empty_side.get("candidates", [])
+        if isinstance(candidates, list) and candidates:
+            lines.append("Traceable candidates:")
+            lines.append("")
+            lines.extend(f"- `{_json(candidate)}`" for candidate in candidates)
+            lines.append("")
+        if empty_side.get("confirmation_rule") is not None:
+            lines.extend(
+                [
+                    f"Confirmation rule: {_display(empty_side.get('confirmation_rule'))}",
+                    "",
+                ]
+            )
+    component_statuses = q3.get("component_statuses")
+    if isinstance(component_statuses, Mapping):
+        lines.extend(
+            [
+                f"Q3 component statuses: `{_json(dict(component_statuses))}`.",
+                "",
+            ]
+        )
+    superseded_examples = q3.get("superseded_validation_examples", [])
+    if isinstance(superseded_examples, list) and superseded_examples:
+        lines.append("Updates excluded because they were superseded before validation:")
+        lines.append("")
+        lines.extend(f"- `{_json(example)}`" for example in superseded_examples)
+        lines.append("")
 
     q4 = summary["q4"]
     lines.extend(
@@ -406,7 +556,7 @@ def render_report(summary: Mapping[str, Any]) -> str:
     lines.extend(["", q7["scope_note"], ""])
 
     q8 = summary["q8"]
-    delays = q8["delay_ms_local_clock_dependent"]
+    delays = _delay_metrics(q8)
     lines.extend(
         [
             f"### Q8 — Timestamp behavior — **{q8['status']}**",
@@ -420,19 +570,29 @@ def render_report(summary: Mapping[str, Any]) -> str:
             f"| Adjacent same-timestamp events | {q8['adjacent_same_timestamp_events']} |",
             f"| Same-timestamp groups | {len(q8['same_timestamp_groups'])} |",
             f"| Source timestamps after local receive | {q8['source_after_local_receive']} |",
-            f"| Delay samples | {delays['count']} |",
-            f"| Minimum delay (ms) | {delays['min']} |",
-            f"| P50 delay (ms) | {delays['p50']} |",
-            f"| P95 delay (ms) | {delays['p95']} |",
-            f"| Maximum delay (ms) | {delays['max']} |",
+            f"| Delay samples | {delays.get('count')} |",
+            f"| Minimum delay (ms) | {delays.get('min')} |",
+            f"| P50 delay (ms) | {delays.get('p50')} |",
+            f"| P95 delay (ms) | {delays.get('p95')} |",
+            f"| Maximum delay (ms) | {delays.get('max')} |",
             "",
-            f"Quantile method: {delays['quantile_method']}.",
+            f"Quantile method: {_display(delays.get('quantile_method'))}.",
             "",
-            "Delay is local-clock dependent. Negative values are retained, not corrected, "
-            "and may indicate clock skew. These measurements do not prove gap-free delivery.",
+            Q8_DELAY_LIMITATION,
+            "",
+            "Negative values are retained, not corrected, and may indicate clock skew. "
+            "These measurements do not prove gap-free delivery.",
             "",
         ]
     )
+    processing_order = q8.get("processing_order")
+    if isinstance(processing_order, Mapping):
+        lines.extend(
+            [
+                f"Recorded processing-order diagnostics: `{_json(processing_order)}`.",
+                "",
+            ]
+        )
 
     _append_counterexamples(lines, summary)
 
@@ -458,7 +618,7 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "- This bounded sample cannot establish that an unobserved field or payload "
             "shape never occurs.",
             "- A short successful run cannot establish gap-free WebSocket delivery.",
-            "- Local-clock delay is not authoritative exchange/network latency.",
+            f"- {Q8_DELAY_LIMITATION}",
             "- REST and WebSocket observations are asynchronous; only predeclared stable "
             "observed windows were eligible for exact depth comparison.",
             "- Feed-derived trade direction was not evaluated and is not treated as "
@@ -474,9 +634,598 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "",
             "- https://docs.polymarket.com/api-reference/wss/market",
             "- https://github.com/Polymarket/agent-skills/blob/main/websocket.md",
+            "- https://github.com/Polymarket/ts-sdk/blob/main/packages/bindings/src/subscriptions/clob.ts",
             "- https://docs.polymarket.com/api-reference/market-data/get-order-book",
             "- https://docs.polymarket.com/v2-migration",
             "- https://docs.polymarket.com/market-data/overview",
+            "- https://github.com/Polymarket/py-clob-client-v2/blob/main/py_clob_client_v2/utilities.py",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _comparative_run_value(run: Mapping[str, Any], property_name: str) -> str:
+    if property_name == "initial_dump":
+        return _subscription_setting(run, "initial_dump")
+    if property_name == "level":
+        return _subscription_setting(run, "level")
+    if property_name == "token_ids":
+        return f"`{_cell(_json(run.get('token_ids', [])))}`"
+    if property_name == "software":
+        return f"`{_cell(_json(run.get('software', {})))}`"
+    if property_name == "subscription_fields":
+        return f"`{_cell(_json(_subscription_fields(run)))}`"
+    if property_name == "subscription_payload":
+        return f"`{_cell(_json(_subscription_payload(run)))}`"
+    value = run.get(property_name)
+    if property_name in {
+        "run_id",
+        "started_at",
+        "ended_at",
+        "raw_evidence_path",
+        "baseline_run_id",
+        "baseline_summary_path",
+        "baseline_summary_sha256",
+        "offline_test_command",
+    }:
+        return f"`{_cell(_display(value))}`"
+    return _cell(_display(value))
+
+
+def _append_comparative_manifest(
+    lines: list[str], label: str, summary: Mapping[str, Any]
+) -> None:
+    evidence = summary.get("evidence", {})
+    if not isinstance(evidence, Mapping):
+        evidence = {}
+    manifest = evidence.get("manifest", {})
+    if not isinstance(manifest, Mapping):
+        manifest = {}
+    files = manifest.get("files", {})
+    if not isinstance(files, Mapping):
+        files = {}
+    records = evidence.get("records", {})
+    if not isinstance(records, Mapping):
+        records = {}
+
+    lines.extend(
+        [
+            f"### {label}",
+            "",
+            f"Run directory: `{_cell(_display(evidence.get('run_directory'), default=_display(summary.get('run', {}).get('raw_evidence_path') if isinstance(summary.get('run'), Mapping) else None)))}`.",
+            "",
+            f"Record counts: `{_json(dict(records))}`.",
+            "",
+            f"Manifest algorithm: `{_cell(_display(manifest.get('algorithm'), default='not recorded'))}`.",
+            "",
+            "| File | Bytes | SHA-256 |",
+            "| --- | ---: | --- |",
+        ]
+    )
+    if not files:
+        lines.append("| _No manifest files recorded_ | n/a | n/a |")
+    else:
+        for name in sorted(files, key=str):
+            detail = files[name]
+            if not isinstance(detail, Mapping):
+                detail = {}
+            lines.append(
+                f"| `{_cell(name)}` | {_display(detail.get('bytes'), default='n/a')} | "
+                f"`{_cell(_display(detail.get('sha256'), default='not recorded'))}` |"
+            )
+    lines.append("")
+
+
+def _append_significant_run_evidence(
+    lines: list[str], label: str, summary: Mapping[str, Any]
+) -> None:
+    lines.extend([f"### {label}", ""])
+    emitted = False
+    evidence = summary.get("evidence", {})
+    if isinstance(evidence, Mapping):
+        duplicate_count = evidence.get("duplicate_raw_frames", 0)
+        if duplicate_count:
+            emitted = True
+            lines.append(
+                f"- Repeated raw-payload hashes retained: **{duplicate_count}**. This "
+                "all-frame count alone does not establish duplicate data events."
+            )
+
+    q3 = summary.get("q3", {})
+    if isinstance(q3, Mapping):
+        excluded = q3.get("excluded_change_entries", 0)
+        observed = q3.get("observed_change_entries", "not recorded")
+        applied = q3.get("applied_change_entries", "not recorded")
+        emitted = True
+        lines.append(
+            f"- Q3 exclusions preserved: **{excluded}** of **{observed}** observed "
+            f"price-change entries were excluded; **{applied}** were applied. Conclusions "
+            "must not be generalized across the excluded evidence."
+        )
+        superseded = q3.get("superseded_before_validation")
+        if superseded is not None:
+            lines.append(
+                f"- Q3 updates superseded before independent validation: **{superseded}**."
+            )
+        superseded_examples = q3.get("superseded_validation_examples", [])
+        if isinstance(superseded_examples, list):
+            for example in superseded_examples:
+                lines.append(f"- Q3 superseded-validation exclusion: `{_json(example)}`")
+        interpretation = q3.get("empty_side_boundary_interpretation")
+        if isinstance(interpretation, Mapping):
+            lines.append(
+                "- Q3 bounded empty-side interpretation: "
+                f"status **{_display(interpretation.get('status'), default='UNRESOLVED')}**, "
+                f"observed candidates **{_display(interpretation.get('observed_candidates'), default='0')}**, "
+                f"confirmed candidates **{_display(interpretation.get('confirmed_candidates'), default='0')}**, "
+                f"unresolved candidates **{_display(interpretation.get('unresolved_candidates'), default='0')}**."
+            )
+            diagnostics = interpretation.get("targeted_rest_diagnostics", {})
+            if isinstance(diagnostics, Mapping) and diagnostics:
+                lines.append(
+                    "- Q3 targeted REST diagnostics: "
+                    f"`{_json(dict(diagnostics))}`."
+                )
+            candidates = interpretation.get("candidates", [])
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    lines.append(f"- Q3 empty-side candidate: `{_json(candidate)}`")
+
+    for index in range(1, 9):
+        section = summary.get(f"q{index}", {})
+        if not isinstance(section, Mapping):
+            continue
+        counterexamples = section.get("counterexamples", [])
+        if not isinstance(counterexamples, list):
+            continue
+        for example in counterexamples:
+            emitted = True
+            lines.append(f"- Q{index} counterexample: `{_json(example)}`")
+
+    errors = summary.get("errors", {})
+    if isinstance(errors, Mapping):
+        counts = errors.get("counts", {})
+        if isinstance(counts, Mapping):
+            for code in sorted(counts, key=str):
+                emitted = True
+                lines.append(
+                    f"- Parser/operational error `{_cell(code)}`: **{counts[code]}** occurrence(s)."
+                )
+        examples = errors.get("examples", [])
+        if isinstance(examples, list):
+            examples_by_code: dict[str, list[Any]] = {}
+            for example in examples:
+                code = str(example.get("code", "uncategorized")) if isinstance(example, Mapping) else "uncategorized"
+                examples_by_code.setdefault(code, []).append(example)
+            for code in sorted(examples_by_code):
+                code_examples = examples_by_code[code]
+                for example in code_examples[:3]:
+                    lines.append(f"- Representative `{_cell(code)}` error: `{_json(example)}`")
+                if len(code_examples) > 3:
+                    lines.append(
+                        f"- `{_cell(code)}`: {len(code_examples) - 3} additional "
+                        "traceable instance(s) remain in the evidence summary."
+                    )
+
+    if not emitted:
+        lines.append("No significant counterexample or exclusion was recorded.")
+    lines.append("")
+
+
+QUESTION_NAMES = (
+    "Current event schema",
+    "Initial dump/reconnect",
+    "Price-level update semantics",
+    "Multiple updates per frame",
+    "Hash semantics",
+    "REST /book comparison",
+    "Optional WebSocket book metadata",
+    "Timestamp and processing-order behavior",
+)
+
+QUESTION_LIMITS = (
+    "Field absence is bounded to the observed sample and does not prove that a field "
+    "cannot appear.",
+    "The result applies only to the named tokens, sessions, subscription payload, and "
+    "clean reconnect; it is not a universal reconnect guarantee.",
+    "Only applied, non-superseded, eligible updates and explicitly aligned REST evidence "
+    "support the label; candidate numeric boundaries are not universal protocol rules.",
+    "A zero count is non-observation, not proof that a frame shape cannot occur.",
+    "Only the cited first-party algorithm and payloads containing all its required inputs "
+    "were eligible; no alternative hash meaning was inferred.",
+    "REST and WebSocket are asynchronous; mismatches remain diagnostics unless the "
+    "declared stable request window exists.",
+    "Presence frequencies apply only to observed full-book frames; absence is not universal.",
+    "Receive-order counters describe local probe processing only, do not prove gap-free "
+    "delivery, and the delay distribution is not a venue/network latency estimate.",
+)
+
+QUESTION_METHOD_DELTAS = (
+    "The schema inventory method is unchanged; the corrective run supplies an independent "
+    "current-production sample.",
+    "The historical run explicitly sent optional controls. The corrective run sends only "
+    "`assets_ids` and `type`, relying on currently documented defaults.",
+    "The corrective analyzer separates locally empty-side numeric 0/1 candidates from "
+    "genuine mismatches, requires targeted aligned REST confirmation, and prevents "
+    "superseded updates from receiving duplicate validation credit.",
+    "The corrective analyzer distinguishes multiple entries for different assets from "
+    "same-asset ordering ambiguity.",
+    "The same official hash algorithm and no-fabricated-input rule apply to both runs.",
+    "The stable-window rule is retained; corrective candidate-targeted GETs add diagnostics "
+    "without turning asynchronous mismatches into WebSocket failures.",
+    "The frequency method is unchanged; differences are sample observations only.",
+    "The numeric provenance is retained, but the corrective report labels it as contaminated "
+    "source-to-processing delay and adds explicit ingest/monotonic processing-order checks.",
+)
+
+
+def _question_evidence(summary: Mapping[str, Any], index: int) -> str:
+    section = summary.get(f"q{index}", {})
+    if not isinstance(section, Mapping):
+        return "Question evidence was not recorded in a mapping-valued summary section."
+    if index == 1:
+        schema = section.get("event_schema", {})
+        if not isinstance(schema, Mapping):
+            schema = {}
+        logical_events = sum(
+            int(detail.get("events", 0))
+            for detail in schema.values()
+            if isinstance(detail, Mapping)
+        )
+        ordering = section.get("candidate_ordering_fields", {})
+        ordering_count = (
+            sum(int(value) for value in ordering.values())
+            if isinstance(ordering, Mapping)
+            else 0
+        )
+        return (
+            f"{logical_events} logical events across {len(schema)} event types; "
+            f"{ordering_count} candidate ordering-field presences."
+        )
+    if index == 2:
+        sessions = section.get("sessions", {})
+        if not isinstance(sessions, Mapping):
+            sessions = {}
+        token_sessions = 0
+        book_first = 0
+        later_delta = 0
+        for session in sessions.values():
+            if not isinstance(session, Mapping):
+                continue
+            tokens = session.get("tokens", {})
+            if not isinstance(tokens, Mapping):
+                continue
+            for result in tokens.values():
+                if not isinstance(result, Mapping):
+                    continue
+                token_sessions += 1
+                book_first += result.get("first_state_event") == "book"
+                later_delta += int(result.get("price_change_entries", 0)) > 0
+        return (
+            f"{len(sessions)} sessions / {token_sessions} token-session observations; "
+            f"book first in {book_first}; later delta exercised in {later_delta}; "
+            f"clean controlled reconnect={_display(section.get('clean_controlled_reconnect'))}."
+        )
+    if index == 3:
+        interpretation = section.get("empty_side_boundary_interpretation", {})
+        if not isinstance(interpretation, Mapping):
+            interpretation = {}
+        return (
+            f"observed/applied/excluded changes="
+            f"{section.get('observed_change_entries', 0)}/"
+            f"{section.get('applied_change_entries', 0)}/"
+            f"{section.get('excluded_change_entries', 0)}; BBO exact/genuine mismatch="
+            f"{section.get('exact_matches', 0)}/"
+            f"{section.get('genuine_mismatches', section.get('mismatches', 0))}; "
+            f"validated non-zero/zero="
+            f"{section.get('independently_validated_nonzero_replacements', 0)}/"
+            f"{section.get('independently_validated_zero_deletes', 0)}; empty-side "
+            f"candidates confirmed/observed="
+            f"{interpretation.get('confirmed_candidates', 0)}/"
+            f"{interpretation.get('observed_candidates', 0)}; superseded before "
+            f"validation={section.get('superseded_before_validation', 0)}."
+        )
+    if index == 4:
+        return (
+            f"frames={section.get('price_change_frames', 0)}; multi-entry="
+            f"{section.get('multi_entry_frames', 0)}; same-asset="
+            f"{section.get('multi_same_asset_frames', 0)}; repeated key="
+            f"{section.get('duplicate_asset_side_price_frames', 0)}; order-sensitive="
+            f"{section.get('order_sensitive_frames', 0)}."
+        )
+    if index == 5:
+        book = section.get("websocket_book", {})
+        change = section.get("price_change_post_update", {})
+        rest = section.get("rest_book_diagnostic", {})
+        book = book if isinstance(book, Mapping) else {}
+        change = change if isinstance(change, Mapping) else {}
+        rest = rest if isinstance(rest, Mapping) else {}
+        return (
+            f"WS book matches/attempts={book.get('matches', 0)}/"
+            f"{book.get('attempts', 0)}; post-change={change.get('matches', 0)}/"
+            f"{change.get('attempts', 0)}; REST diagnostic={rest.get('matches', 0)}/"
+            f"{rest.get('attempts', 0)}."
+        )
+    if index == 6:
+        return (
+            f"successful/total REST responses={section.get('successful_responses', 0)}/"
+            f"{section.get('requests', 0)}; stable aligned exact/mismatch="
+            f"{section.get('aligned_matches', 0)}/"
+            f"{section.get('aligned_mismatches', 0)}; unaligned diagnostics="
+            f"{section.get('unaligned_diagnostics', 0)}."
+        )
+    if index == 7:
+        return (
+            f"{section.get('websocket_book_events', 0)} full-book events; optional "
+            f"field presence={_json(section.get('optional_field_presence', {}))}."
+        )
+    processing = section.get("processing_order", {})
+    if not isinstance(processing, Mapping):
+        processing = {}
+    delays = _delay_metrics(section)
+    return (
+        f"timestamped events={section.get('timestamped_events', 0)}; source regressions="
+        f"{section.get('source_timestamp_regressions', 0)}; same-timestamp groups="
+        f"{len(section.get('same_timestamp_groups', []))}; future-source="
+        f"{section.get('source_after_local_receive', 0)}; ingest/monotonic receive-order "
+        f"regressions={processing.get('ingest_sequence_regressions', 'not recorded')}/"
+        f"{processing.get('received_monotonic_ns_regressions', 'not recorded')}; "
+        f"delay samples={delays.get('count', 0)}."
+    )
+
+
+def render_comparative_report(
+    original: Mapping[str, Any], corrective: Mapping[str, Any]
+) -> str:
+    """Render a deterministic report that preserves two independently captured runs."""
+
+    original_run = original.get("run", {})
+    corrective_run = corrective.get("run", {})
+    if not isinstance(original_run, Mapping) or not isinstance(corrective_run, Mapping):
+        raise TypeError("both summaries must contain a mapping-valued run section")
+
+    lines: list[str] = [
+        "# Market Feed Contract Probe: Historical and Corrective Evidence",
+        "",
+        "Status: **comparative bounded read-only research report**",
+        "",
+        "The historical run remains immutable evidence. The corrective run is additional "
+        "evidence collected under a revised probe; it does not overwrite the historical "
+        "run, its exclusions, counterexamples, status labels, or manifest.",
+        "",
+        "## Run identities and provenance",
+        "",
+        "| Property | Historical/original run | Corrective run |",
+        "| --- | --- | --- |",
+    ]
+    run_properties = [
+        ("Run ID", "run_id"),
+        ("UTC start", "started_at"),
+        ("UTC end", "ended_at"),
+        ("Requested duration (seconds)", "requested_duration_seconds"),
+        ("Actual duration (seconds)", "actual_duration_seconds"),
+        ("REST interval (seconds)", "rest_interval_seconds"),
+        ("Controlled reconnects", "controlled_reconnects"),
+        ("Sample/token IDs", "token_ids"),
+        ("Sample provenance", "sample_note"),
+        ("Initial dump subscription field", "initial_dump"),
+        ("WebSocket level subscription field", "level"),
+        ("Subscription control", "subscription_control"),
+        ("Subscription fields", "subscription_fields"),
+        ("Subscription payload", "subscription_payload"),
+        ("Raw evidence path", "raw_evidence_path"),
+        ("Raw capture boundary", "raw_boundary"),
+        ("Software provenance", "software"),
+        ("Offline test command", "offline_test_command"),
+        ("Offline test result", "offline_test_result"),
+        ("Baseline run ID", "baseline_run_id"),
+        ("Baseline summary path", "baseline_summary_path"),
+        ("Baseline summary SHA-256", "baseline_summary_sha256"),
+    ]
+    for label, key in run_properties:
+        lines.append(
+            f"| {label} | {_comparative_run_value(original_run, key)} | "
+            f"{_comparative_run_value(corrective_run, key)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "Both summaries are reported with their own provenance. A baseline pointer in "
+            "the corrective run is a lineage reference, not permission to merge or replace "
+            "the historical evidence.",
+            "",
+            "## Raw evidence manifests",
+            "",
+        ]
+    )
+    _append_comparative_manifest(lines, "Historical/original run", original)
+    _append_comparative_manifest(lines, "Corrective run", corrective)
+
+    lines.extend(
+        [
+            "## Q1-Q8 status delta",
+            "",
+            "Statuses are bounded to each run's eligible evidence. A change in status is "
+            "not a retroactive rewrite of the historical result.",
+            "",
+            "| Question | Historical/original status | Corrective status | Delta |",
+            "| --- | --- | --- | --- |",
+        ]
+    )
+    for index in range(1, 9):
+        original_section = original.get(f"q{index}", {})
+        corrective_section = corrective.get(f"q{index}", {})
+        original_status = (
+            _display(original_section.get("status"), default="UNRESOLVED")
+            if isinstance(original_section, Mapping)
+            else "UNRESOLVED"
+        )
+        corrective_status = (
+            _display(corrective_section.get("status"), default="UNRESOLVED")
+            if isinstance(corrective_section, Mapping)
+            else "UNRESOLVED"
+        )
+        delta = (
+            "UNCHANGED"
+            if original_status == corrective_status
+            else f"{original_status} -> {corrective_status}"
+        )
+        lines.append(
+            f"| Q{index} | **{_cell(original_status)}** | "
+            f"**{_cell(corrective_status)}** | `{_cell(delta)}` |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Per-question evidence, differences, and applicability",
+            "",
+            "Counterexamples and exclusions are reproduced in the later significant-"
+            "evidence section with raw ingest-sequence lineage where available.",
+            "",
+        ]
+    )
+    for index, question_name in enumerate(QUESTION_NAMES, start=1):
+        original_section = original.get(f"q{index}", {})
+        corrective_section = corrective.get(f"q{index}", {})
+        original_status = (
+            _display(original_section.get("status"), default="UNRESOLVED")
+            if isinstance(original_section, Mapping)
+            else "UNRESOLVED"
+        )
+        corrective_status = (
+            _display(corrective_section.get("status"), default="UNRESOLVED")
+            if isinstance(corrective_section, Mapping)
+            else "UNRESOLVED"
+        )
+        lines.extend(
+            [
+                f"### Q{index} — {question_name}",
+                "",
+                f"- Historical/original: **{original_status}** — "
+                f"{_question_evidence(original, index)}",
+                f"- Corrective: **{corrective_status}** — "
+                f"{_question_evidence(corrective, index)}",
+                f"- Difference/method: {QUESTION_METHOD_DELTAS[index - 1]}",
+                f"- Applicability limit: {QUESTION_LIMITS[index - 1]}",
+                "",
+            ]
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Evidence classification",
+            "",
+            "### Established",
+            "",
+            "- First-party material establishes that the public Market WebSocket carries "
+            "full `book` snapshots and `price_change` level updates, and explicitly "
+            "describes zero-size changes as level removals and non-zero `size` as the new "
+            "aggregate size.",
+            "- The current first-party schema documents `initial_dump` and `level` as "
+            "optional subscription fields with defaults. Current official TypeScript "
+            "bindings separately document an empty string as the raw absent-value form "
+            "for optional best bid/ask decimals.",
+            "- Each run's identity, software provenance, raw-evidence path, record counts, "
+            "and manifest digests establish what these named artifacts contain; they do "
+            "not establish universal venue behavior.",
+            "",
+            "### Suggested",
+            "",
+            "- Numeric `best_ask=1` or `best_bid=0` coinciding with a locally empty side is "
+            "suggested by first-party examples and bounded live observations, but no "
+            "first-party source found explicitly defines those numbers as empty-side "
+            "sentinels.",
+            "- A high best-price match rate is supportive but cannot independently establish "
+            "aggregate replacement semantics or completeness.",
+            "",
+            "### Project-derived",
+            "",
+            "- Stable-window REST alignment, discriminating-update eligibility, exclusion "
+            "rules, and the historical/corrective comparison are project-defined methods.",
+            "- Any interpretation of observed `best_ask=1` or `best_bid=0` as an empty side "
+            "is limited to directly aligned candidates in the named run. This report does "
+            "not claim that numeric 0/1 values are universal empty-side protocol sentinels.",
+            "",
+            "## Current documentation discrepancy and subscription control",
+            "",
+            "The current first-party Market WebSocket documentation describes `initial_dump` "
+            "and `level` as optional subscription fields with documented defaults. The "
+            "historical run sent both fields explicitly; the corrective configuration records "
+            "whether it omitted them and relied on those defaults. This differs from the "
+            "historical report's premise that these controls were undocumented. It is a "
+            "documentation-version discrepancy and experimental control, not evidence that "
+            "the same omission semantics applied universally or at every historical point.",
+            "",
+            "Current reference: https://docs.polymarket.com/api-reference/wss/market",
+            "",
+            "## Q8 measurement boundary",
+            "",
+            Q8_DELAY_LIMITATION,
+            "",
+            "The two runs may still be compared for source-timestamp ordering diagnostics "
+            "and for their separately recorded contaminated processing-delay distributions; "
+            "neither distribution estimates venue or network latency.",
+            "",
+            "| Metric | Historical/original run | Corrective run |",
+            "| --- | ---: | ---: |",
+        ]
+    )
+    original_delays = _delay_metrics(
+        original.get("q8", {}) if isinstance(original.get("q8"), Mapping) else {}
+    )
+    corrective_delays = _delay_metrics(
+        corrective.get("q8", {}) if isinstance(corrective.get("q8"), Mapping) else {}
+    )
+    for label, key in [
+        ("Samples", "count"),
+        ("Minimum (ms)", "min"),
+        ("P50 (ms)", "p50"),
+        ("P95 (ms)", "p95"),
+        ("Maximum (ms)", "max"),
+    ]:
+        lines.append(
+            f"| {label} | {_cell(_display(original_delays.get(key)))} | "
+            f"{_cell(_display(corrective_delays.get(key)))} |"
+        )
+
+    lines.extend(["", "## Significant counterexamples, exclusions, and errors", ""])
+    _append_significant_run_evidence(lines, "Historical/original run", original)
+    _append_significant_run_evidence(lines, "Corrective run", corrective)
+
+    lines.extend(
+        [
+            "## Scope limitations",
+            "",
+            "- Both runs are bounded samples; non-observation does not establish impossibility.",
+            "- Neither a short successful connection nor matching top-of-book values proves "
+            "gap-free delivery or full-depth correctness.",
+            "- Historical exclusions remain exclusions and cannot be converted into eligible "
+            "evidence by the corrective run.",
+            "- No result here is a trading-performance result.",
+            "",
+            "## Safety boundary",
+            "",
+            "Both runs used only the fixed public Market WebSocket, `PING` heartbeats, "
+            "and public `GET /book`. No authenticated endpoint, user WebSocket, API "
+            "credential, wallet, signing key, order construction, simulation, placement, "
+            "cancellation, live trading, or paper trading was used.",
+            "",
+            "## Deviations from IP-001",
+            "",
+            "None. The corrective work remains a bounded probe using the packet-authorized "
+            "explicit-token mode. It does not implement a production collector, replay "
+            "engine, or any code under `src/`.",
+            "",
+            "## First-party references applied",
+            "",
+            "- https://docs.polymarket.com/api-reference/wss/market",
+            "- https://github.com/Polymarket/agent-skills/blob/main/websocket.md",
+            "- https://github.com/Polymarket/ts-sdk/blob/main/packages/bindings/src/subscriptions/clob.ts",
+            "- https://docs.polymarket.com/api-reference/market-data/get-order-book",
             "- https://github.com/Polymarket/py-clob-client-v2/blob/main/py_clob_client_v2/utilities.py",
             "",
         ]

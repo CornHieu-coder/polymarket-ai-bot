@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-PROBE_VERSION = "0.1.0"
+PROBE_VERSION = "0.2.0"
 KNOWN_EVENT_TYPES = {
     "book",
     "price_change",
@@ -308,6 +308,7 @@ class EvidenceStore:
         state_session_after: str | None = None,
         state_valid_before: bool = False,
         state_valid_after: bool = False,
+        request_context: Mapping[str, Any] | None = None,
     ) -> tuple[dict[str, Any], Any | None]:
         if isinstance(raw_response, bytes):
             payload_kind = "bytes_base64"
@@ -370,6 +371,7 @@ class EvidenceStore:
             "state_session_after": state_session_after,
             "state_valid_before": state_valid_before,
             "state_valid_after": state_valid_after,
+            "request_context": dict(request_context or {}),
         }
         self._writers["rest"].append(record)
         self.counts["rest_responses"] += 1
@@ -666,6 +668,13 @@ class ContractAnalyzer:
     direct_comparison_mismatches: int = 0
     comparison_components: Counter[str] = field(default_factory=Counter)
     comparison_counterexamples: list[dict[str, Any]] = field(default_factory=list)
+    empty_side_candidate_entries: int = 0
+    empty_side_candidates: list[dict[str, Any]] = field(default_factory=list)
+    empty_side_candidates_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    pending_empty_side_probe_requests: list[dict[str, Any]] = field(default_factory=list)
+    empty_side_rest_confirmations: Counter[str] = field(default_factory=Counter)
+    empty_side_rest_diagnostics: Counter[str] = field(default_factory=Counter)
+    empty_side_rest_unaligned: int = 0
     zero_updates: int = 0
     nonzero_updates: int = 0
     side_updates: Counter[str] = field(default_factory=Counter)
@@ -673,9 +682,13 @@ class ContractAnalyzer:
     discriminating_zero_deletes: int = 0
     validated_nonzero_replacements: int = 0
     validated_zero_deletes: int = 0
-    pending_discriminating: dict[str, list[dict[str, Any]]] = field(
-        default_factory=lambda: defaultdict(list)
+    pending_discriminating: dict[
+        str, dict[tuple[str, Decimal], dict[str, Any]]
+    ] = field(
+        default_factory=lambda: defaultdict(dict)
     )
+    superseded_before_validation: int = 0
+    superseded_validation_examples: list[dict[str, Any]] = field(default_factory=list)
     idempotent_replacements: int = 0
     price_change_frames: int = 0
     price_change_entries_total: int = 0
@@ -720,6 +733,19 @@ class ContractAnalyzer:
     delay_ms: list[Decimal] = field(default_factory=list)
     future_timestamps: int = 0
     timestamp_counterexamples: list[dict[str, Any]] = field(default_factory=list)
+    websocket_records_observed: int = 0
+    websocket_monotonic_timestamps_observed: int = 0
+    websocket_ingest_sequence_regressions: int = 0
+    websocket_monotonic_receive_regressions: int = 0
+    last_websocket_ingest_sequence: int | None = None
+    last_websocket_received_monotonic_ns: int | None = None
+
+    def take_empty_side_probe_requests(self) -> list[dict[str, Any]]:
+        """Return and clear targeted public REST requests created by wire ambiguities."""
+
+        requests = self.pending_empty_side_probe_requests
+        self.pending_empty_side_probe_requests = []
+        return requests
 
     def start_session(self, session_id: str) -> None:
         self.current_session = session_id
@@ -779,6 +805,7 @@ class ContractAnalyzer:
     def observe_websocket(self, record: Mapping[str, Any], decoded: Any | None) -> list[dict[str, Any]]:
         before = sum(self.errors.values())
         before_examples = len(self.error_examples)
+        self._observe_websocket_receive_order(record)
         digest = str(record.get("raw_payload_sha256", ""))
         if digest:
             self.raw_hashes[digest] += 1
@@ -824,6 +851,44 @@ class ContractAnalyzer:
         if sum(self.errors.values()) == before:
             return []
         return self.error_examples[before_examples:]
+
+    def _observe_websocket_receive_order(self, record: Mapping[str, Any]) -> None:
+        """Measure the probe's processing order without inferring transport gaps."""
+
+        sequence = int(record["ingest_sequence"])
+        self.websocket_records_observed += 1
+        if (
+            self.last_websocket_ingest_sequence is not None
+            and sequence <= self.last_websocket_ingest_sequence
+        ):
+            self.websocket_ingest_sequence_regressions += 1
+            self._record_error(
+                "websocket_ingest_sequence_regression",
+                ingest_sequence=sequence,
+                event_type=None,
+                message="WebSocket record ingest_sequence did not increase",
+                details={"previous": self.last_websocket_ingest_sequence},
+            )
+        self.last_websocket_ingest_sequence = sequence
+
+        raw_monotonic = record.get("received_monotonic_ns")
+        if raw_monotonic is None:
+            return
+        monotonic_ns = int(raw_monotonic)
+        self.websocket_monotonic_timestamps_observed += 1
+        if (
+            self.last_websocket_received_monotonic_ns is not None
+            and monotonic_ns < self.last_websocket_received_monotonic_ns
+        ):
+            self.websocket_monotonic_receive_regressions += 1
+            self._record_error(
+                "websocket_monotonic_receive_regression",
+                ingest_sequence=sequence,
+                event_type=None,
+                message="WebSocket received_monotonic_ns regressed",
+                details={"previous": self.last_websocket_received_monotonic_ns},
+            )
+        self.last_websocket_received_monotonic_ns = monotonic_ns
 
     def _observe_event(
         self, record: Mapping[str, Any], event: Mapping[str, Any], event_index: int
@@ -891,6 +956,20 @@ class ContractAnalyzer:
         ):
             item["first_delta_ingest_sequence"] = ingest_sequence
 
+    def _record_superseded_validation(
+        self, pending: Mapping[str, Any], *, superseding_sequence: int
+    ) -> None:
+        """Retire evidence whose exact level was changed before REST validation."""
+
+        self.superseded_before_validation += 1
+        if len(self.superseded_validation_examples) < 20:
+            self.superseded_validation_examples.append(
+                {
+                    **dict(pending),
+                    "superseding_ingest_sequence": superseding_sequence,
+                }
+            )
+
     def _observe_book(self, record: Mapping[str, Any], event: Mapping[str, Any]) -> None:
         sequence = int(record["ingest_sequence"])
         self.book_events += 1
@@ -914,7 +993,10 @@ class ContractAnalyzer:
         if item is not None:
             item["book_events"] += 1
         self.state_versions[state.asset_id] += 1
-        self.pending_discriminating[state.asset_id] = []
+        pending = self.pending_discriminating[state.asset_id]
+        for prior in pending.values():
+            self._record_superseded_validation(prior, superseding_sequence=sequence)
+        self.pending_discriminating[state.asset_id] = {}
 
         if all(field in event for field in OFFICIAL_HASH_FIELDS):
             self.book_hash_attempts += 1
@@ -986,7 +1068,8 @@ class ContractAnalyzer:
             for change in changes
             if isinstance(change, Mapping) and change.get("asset_id") is not None
         ]
-        if any(count > 1 for count in Counter(assets).values()):
+        asset_entry_counts = Counter(assets)
+        if any(count > 1 for count in asset_entry_counts.values()):
             self.multi_same_asset_frames += 1
 
         keyed_sizes: dict[tuple[str, str, Any], list[tuple[str, Any]]] = defaultdict(list)
@@ -1109,32 +1192,35 @@ class ContractAnalyzer:
                 self.price_change_entries_excluded += 1
                 continue
 
+            pending_key = (side, price)
+            superseded = self.pending_discriminating[token].pop(pending_key, None)
+            if superseded is not None:
+                self._record_superseded_validation(
+                    superseded, superseding_sequence=sequence
+                )
+
             if size == 0:
                 self.zero_updates += 1
                 if old_level is not None and old_level.size > 0:
                     self.discriminating_zero_deletes += 1
-                    self.pending_discriminating[token].append(
-                        {
-                            "kind": "zero_delete",
-                            "ingest_sequence": sequence,
-                            "side": side,
-                            "price": str(change["price"]),
-                        }
-                    )
+                    self.pending_discriminating[token][pending_key] = {
+                        "kind": "zero_delete",
+                        "ingest_sequence": sequence,
+                        "side": side,
+                        "price": str(change["price"]),
+                    }
             else:
                 self.nonzero_updates += 1
                 if old_level is not None and old_level.size != size:
                     self.discriminating_nonzero_updates += 1
-                    self.pending_discriminating[token].append(
-                        {
-                            "kind": "nonzero_replacement",
-                            "ingest_sequence": sequence,
-                            "side": side,
-                            "price": str(change["price"]),
-                            "previous_size": old_level.size_text,
-                            "observed_size": str(change["size"]),
-                        }
-                    )
+                    self.pending_discriminating[token][pending_key] = {
+                        "kind": "nonzero_replacement",
+                        "ingest_sequence": sequence,
+                        "side": side,
+                        "price": str(change["price"]),
+                        "previous_size": old_level.size_text,
+                        "observed_size": str(change["size"]),
+                    }
             self.side_updates[side] += 1
             if idempotent:
                 self.idempotent_replacements += 1
@@ -1147,6 +1233,7 @@ class ContractAnalyzer:
                 sequence,
                 change_index,
                 len(changes),
+                asset_entry_counts[token],
                 token,
                 state,
                 change,
@@ -1158,6 +1245,7 @@ class ContractAnalyzer:
         sequence: int,
         change_index: int,
         frame_entry_count: int,
+        asset_entry_count: int,
         token: str,
         state: BookState,
         change: Mapping[str, Any],
@@ -1167,6 +1255,7 @@ class ContractAnalyzer:
             return
         self.comparison_entries += 1
         mismatches: dict[str, dict[str, str | None]] = {}
+        candidates: list[dict[str, Any]] = []
         for name in supplied:
             raw_value = change[name]
             try:
@@ -1189,6 +1278,50 @@ class ContractAnalyzer:
             self.comparison_components[f"{name}_total"] += 1
             if observed == derived:
                 self.comparison_components[f"{name}_matches"] += 1
+            elif derived is None and (
+                (name == "best_ask" and observed == Decimal("1"))
+                or (name == "best_bid" and observed == Decimal("0"))
+            ):
+                kind = (
+                    "ask_one_when_empty"
+                    if name == "best_ask"
+                    else "bid_zero_when_empty"
+                )
+                candidate_id = f"{sequence}:{change_index}:{name}"
+                candidate = {
+                    "candidate_id": candidate_id,
+                    "kind": kind,
+                    "ingest_sequence": sequence,
+                    "change_index": change_index,
+                    "asset_id": token,
+                    "component": name,
+                    "wire_value": decimal_text(observed),
+                    "derived_value": None,
+                    "state_version": self.state_versions[token],
+                    "session_id": self.current_session,
+                    "price": str(change.get("price")),
+                    "size": str(change.get("size")),
+                    "side": str(change.get("side")),
+                    "rest_validation": "UNRESOLVED",
+                    "rest_ingest_sequence": None,
+                    "rest_attempts": [],
+                }
+                self.comparison_components[f"{name}_empty_side_boundary_candidates"] += 1
+                self.empty_side_candidates.append(candidate)
+                self.empty_side_candidates_by_id[candidate_id] = candidate
+                self.pending_empty_side_probe_requests.append(
+                    {
+                        "request_purpose": "empty_side_boundary_candidate",
+                        "candidate_id": candidate_id,
+                        "candidate_kind": kind,
+                        "candidate_ingest_sequence": sequence,
+                        "candidate_state_version": self.state_versions[token],
+                        "candidate_session_id": self.current_session,
+                        "candidate_component": name,
+                        "token_id": token,
+                    }
+                )
+                candidates.append(candidate)
             else:
                 self.comparison_components[f"{name}_mismatches"] += 1
                 mismatches[name] = {
@@ -1198,7 +1331,7 @@ class ContractAnalyzer:
 
         if mismatches:
             self.comparison_mismatches += 1
-            if frame_entry_count == 1:
+            if asset_entry_count == 1:
                 self.direct_comparison_mismatches += 1
             state.valid = False
             example = {
@@ -1209,7 +1342,8 @@ class ContractAnalyzer:
                 "size": str(change.get("size")),
                 "side": str(change.get("side")),
                 "frame_entry_count": frame_entry_count,
-                "multi_entry_semantics_ambiguous": frame_entry_count > 1,
+                "asset_entry_count": asset_entry_count,
+                "multi_entry_semantics_ambiguous": asset_entry_count > 1,
                 "mismatches": mismatches,
             }
             if len(self.comparison_counterexamples) < 20:
@@ -1221,6 +1355,8 @@ class ContractAnalyzer:
                 message="reconstructed best bid/ask did not match event values",
                 details=example,
             )
+        elif candidates:
+            self.empty_side_candidate_entries += 1
         else:
             self.comparison_matches += 1
 
@@ -1339,13 +1475,54 @@ class ContractAnalyzer:
             self.last_timestamp_by_token[token] = source_ms
             self.timestamp_group_counts[(token, str(event["timestamp"]))] += 1
 
+    def _record_empty_side_rest_attempt(
+        self,
+        context: Any,
+        *,
+        ingest_sequence: int,
+        outcome: str,
+        details: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Attach a targeted REST outcome without promoting diagnostics to proof."""
+
+        if not isinstance(context, Mapping) or context.get("request_purpose") != (
+            "empty_side_boundary_candidate"
+        ):
+            return False
+        candidate_id = str(context.get("candidate_id", ""))
+        candidate = self.empty_side_candidates_by_id.get(candidate_id)
+        if candidate is None:
+            self.empty_side_rest_diagnostics["unknown_candidate"] += 1
+            return True
+        attempt = {
+            "ingest_sequence": ingest_sequence,
+            "outcome": outcome,
+            **dict(details or {}),
+        }
+        candidate["rest_attempts"].append(attempt)
+        candidate["rest_ingest_sequence"] = ingest_sequence
+        if outcome == "CONFIRMED":
+            if candidate["rest_validation"] != "CONFIRMED":
+                candidate["rest_validation"] = "CONFIRMED"
+                self.empty_side_rest_confirmations[str(candidate["kind"])] += 1
+        else:
+            self.empty_side_rest_diagnostics[outcome] += 1
+        return True
+
     def observe_rest(self, record: Mapping[str, Any], decoded: Any | None) -> None:
         self.rest_requests += 1
         status = int(record["status_code"])
         self.rest_statuses[status] += 1
         sequence = int(record["ingest_sequence"])
         token = str(record["token_id"])
+        context = record.get("request_context")
         if status < 200 or status >= 300:
+            self._record_empty_side_rest_attempt(
+                context,
+                ingest_sequence=sequence,
+                outcome="non_2xx",
+                details={"status_code": status},
+            )
             self._record_error(
                 "rest_non_2xx",
                 ingest_sequence=sequence,
@@ -1359,6 +1536,11 @@ class ContractAnalyzer:
                 )
             return
         if record.get("parse_status") != "ok" or not isinstance(decoded, Mapping):
+            self._record_empty_side_rest_attempt(
+                context,
+                ingest_sequence=sequence,
+                outcome="invalid_response",
+            )
             self._record_error(
                 "rest_invalid_json",
                 ingest_sequence=sequence,
@@ -1424,12 +1606,23 @@ class ContractAnalyzer:
         )
         if not stable_observed_window:
             self.rest_unaligned += 1
+            if self._record_empty_side_rest_attempt(
+                context,
+                ingest_sequence=sequence,
+                outcome="unaligned_request_window",
+            ):
+                self.empty_side_rest_unaligned += 1
             return
 
         try:
             rest_bids = _parse_levels(decoded.get("bids"), "rest.bids")
             rest_asks = _parse_levels(decoded.get("asks"), "rest.asks")
         except ProbeParseError as exc:
+            self._record_empty_side_rest_attempt(
+                context,
+                ingest_sequence=sequence,
+                outcome="malformed_rest_book",
+            )
             self._record_error(
                 exc.code,
                 ingest_sequence=sequence,
@@ -1443,14 +1636,62 @@ class ContractAnalyzer:
         rest_ask_values = {price: level.size for price, level in rest_asks.items()}
         state_bid_values = {price: level.size for price, level in state.bids.items()}
         state_ask_values = {price: level.size for price, level in state.asks.items()}
-        if rest_bid_values == state_bid_values and rest_ask_values == state_ask_values:
+        full_depth_match = (
+            rest_bid_values == state_bid_values and rest_ask_values == state_ask_values
+        )
+        if isinstance(context, Mapping) and context.get("request_purpose") == (
+            "empty_side_boundary_candidate"
+        ):
+            candidate_id = str(context.get("candidate_id", ""))
+            candidate = self.empty_side_candidates_by_id.get(candidate_id)
+            candidate_aligned = (
+                candidate is not None
+                and candidate["asset_id"] == token
+                and candidate["session_id"] == self.current_session
+                and candidate["state_version"] == record.get("state_version_before")
+                and candidate["state_version"] == record.get("state_version_after")
+            )
+            if candidate_aligned:
+                component = str(candidate["component"])
+                rest_side_empty = (
+                    not rest_asks if component == "best_ask" else not rest_bids
+                )
+                if full_depth_match and rest_side_empty:
+                    self._record_empty_side_rest_attempt(
+                        context,
+                        ingest_sequence=sequence,
+                        outcome="CONFIRMED",
+                        details={
+                            "full_depth_match": True,
+                            "relevant_rest_side_empty": True,
+                        },
+                    )
+                else:
+                    self._record_empty_side_rest_attempt(
+                        context,
+                        ingest_sequence=sequence,
+                        outcome="aligned_full_depth_mismatch",
+                        details={
+                            "full_depth_match": full_depth_match,
+                            "relevant_rest_side_empty": rest_side_empty,
+                        },
+                    )
+            else:
+                self.empty_side_rest_unaligned += 1
+                self._record_empty_side_rest_attempt(
+                    context,
+                    ingest_sequence=sequence,
+                    outcome="candidate_state_superseded",
+                )
+
+        if full_depth_match:
             self.rest_aligned_matches += 1
-            for pending in self.pending_discriminating[token]:
+            for pending in self.pending_discriminating[token].values():
                 if pending["kind"] == "nonzero_replacement":
                     self.validated_nonzero_replacements += 1
                 elif pending["kind"] == "zero_delete":
                     self.validated_zero_deletes += 1
-            self.pending_discriminating[token] = []
+            self.pending_discriminating[token] = {}
         else:
             self.rest_aligned_mismatches += 1
             if len(self.rest_counterexamples) < 20:
@@ -1472,15 +1713,25 @@ class ContractAnalyzer:
         token_id: str,
         error_kind: str,
         message: str,
+        request_context: Mapping[str, Any] | None = None,
     ) -> None:
         self.rest_requests += 1
         self.rest_statuses[0] += 1
+        self._record_empty_side_rest_attempt(
+            request_context,
+            ingest_sequence=ingest_sequence,
+            outcome=error_kind,
+            details={"message": message},
+        )
         self._record_error(
             error_kind,
             ingest_sequence=ingest_sequence,
             event_type=None,
             message=message,
-            details={"asset_id": token_id},
+            details={
+                "asset_id": token_id,
+                "request_context": dict(request_context or {}),
+            },
         )
         if len(self.rest_counterexamples) < 20:
             self.rest_counterexamples.append(
@@ -1524,8 +1775,34 @@ class ContractAnalyzer:
             }
 
         q2_counterexamples: list[dict[str, Any]] = []
-        all_first_books = bool(self.sessions) and len(self.sessions) >= 2
-        all_exercised_after_book = all_first_books
+        ordered_session_ids = sorted(self.sessions)
+        enough_sessions = len(ordered_session_ids) >= 2
+        all_sessions_completed = enough_sessions and all(
+            self.sessions[session_id]["completed"]
+            for session_id in ordered_session_ids
+        )
+        clean_controlled_reconnect = False
+        if enough_sessions:
+            first_session = self.sessions[ordered_session_ids[0]]
+            clean_controlled_reconnect = bool(
+                first_session["completed"]
+                and first_session["controlled_disconnect"]
+                and first_session["disconnect_error"] is None
+            )
+            if not clean_controlled_reconnect:
+                q2_counterexamples.append(
+                    {
+                        "session_id": ordered_session_ids[0],
+                        "kind": "first_session_not_cleanly_controlled",
+                        "completed": first_session["completed"],
+                        "controlled_disconnect": first_session[
+                            "controlled_disconnect"
+                        ],
+                        "disconnect_error": first_session["disconnect_error"],
+                    }
+                )
+        all_first_books = enough_sessions
+        all_exercised_after_book = enough_sessions
         for session_id, session in sorted(self.sessions.items()):
             if not session["completed"]:
                 all_first_books = False
@@ -1552,13 +1829,43 @@ class ContractAnalyzer:
                             ],
                         }
                     )
-        if any(item["first_state_event"] == "price_change" for item in q2_counterexamples):
+        if any(
+            item.get("first_state_event") == "price_change"
+            for item in q2_counterexamples
+        ):
             q2_status = "CONTRADICTED"
-        elif all_first_books and all_exercised_after_book:
+        elif (
+            all_sessions_completed
+            and clean_controlled_reconnect
+            and all_first_books
+            and all_exercised_after_book
+        ):
             q2_status = "CONFIRMED"
         else:
             q2_status = "UNRESOLVED"
 
+        candidate_kind_counts = Counter(
+            str(candidate["kind"]) for candidate in self.empty_side_candidates
+        )
+        observed_candidate_kinds = sorted(candidate_kind_counts)
+        confirmed_candidate_kinds = sorted(
+            kind
+            for kind in observed_candidate_kinds
+            if self.empty_side_rest_confirmations[kind] > 0
+        )
+        empty_side_interpretation_supported = bool(observed_candidate_kinds) and (
+            confirmed_candidate_kinds == observed_candidate_kinds
+        )
+        empty_side_interpretation_status = (
+            "CONFIRMED" if empty_side_interpretation_supported else "UNRESOLVED"
+        )
+        unresolved_candidate_count = sum(
+            candidate["rest_validation"] != "CONFIRMED"
+            for candidate in self.empty_side_candidates
+        )
+        empty_side_requirement_met = (
+            not self.empty_side_candidates or empty_side_interpretation_supported
+        )
         if self.direct_comparison_mismatches:
             q3_status = "CONTRADICTED"
         elif (
@@ -1568,6 +1875,7 @@ class ContractAnalyzer:
             and self.validated_zero_deletes > 0
             and self.side_updates["BUY"] > 0
             and self.side_updates["SELL"] > 0
+            and empty_side_requirement_met
         ):
             q3_status = "CONFIRMED"
         else:
@@ -1610,7 +1918,11 @@ class ContractAnalyzer:
         timestamps_exercised = bool(self.token_ids) and all(
             self.timestamp_count_by_token[token] >= 2 for token in self.token_ids
         )
-        if self.timestamp_regressions:
+        if (
+            self.timestamp_regressions
+            or self.websocket_ingest_sequence_regressions
+            or self.websocket_monotonic_receive_regressions
+        ):
             q8_status = "CONTRADICTED"
         elif self.timestamp_events and timestamps_exercised:
             q8_status = "CONFIRMED"
@@ -1641,6 +1953,15 @@ class ContractAnalyzer:
             "q2": {
                 "status": q2_status,
                 "sessions": self.sessions,
+                "sessions_observed": len(self.sessions),
+                "all_sessions_completed": all_sessions_completed,
+                "clean_controlled_reconnect": clean_controlled_reconnect,
+                "scope_note": (
+                    "This confirms only that fresh full books preceded later deltas "
+                    "for every sampled token in two completed corrective sessions "
+                    "using the minimal subscription payload and a clean controlled "
+                    "reconnect. It is not a universal guarantee about server defaults."
+                ),
                 "counterexamples": q2_counterexamples,
             },
             "q3": {
@@ -1651,6 +1972,7 @@ class ContractAnalyzer:
                 "excluded_change_entries": self.price_change_entries_excluded,
                 "exact_matches": self.comparison_matches,
                 "mismatches": self.comparison_mismatches,
+                "genuine_mismatches": self.comparison_mismatches,
                 "direct_single-entry_mismatches": self.direct_comparison_mismatches,
                 "components": dict(sorted(self.comparison_components.items())),
                 "zero_size_updates": self.zero_updates,
@@ -1662,7 +1984,80 @@ class ContractAnalyzer:
                     self.validated_nonzero_replacements
                 ),
                 "independently_validated_zero_deletes": self.validated_zero_deletes,
+                "superseded_before_validation": self.superseded_before_validation,
+                "superseded_validation_examples": (
+                    self.superseded_validation_examples
+                ),
                 "idempotent_replacements": self.idempotent_replacements,
+                "empty_side_boundary_interpretation": {
+                    "status": empty_side_interpretation_status,
+                    "scope": (
+                        "Probe-only, observation-bounded candidate interpretation. "
+                        "Numeric 1/0 is never normalized globally and first-party "
+                        "materials do not define it as an empty-side sentinel."
+                    ),
+                    "observed_candidates": len(self.empty_side_candidates),
+                    "observed_kinds": {
+                        kind: candidate_kind_counts[kind]
+                        for kind in observed_candidate_kinds
+                    },
+                    "confirmed_candidates": sum(
+                        candidate["rest_validation"] == "CONFIRMED"
+                        for candidate in self.empty_side_candidates
+                    ),
+                    "confirmed_kinds": {
+                        kind: self.empty_side_rest_confirmations[kind]
+                        for kind in confirmed_candidate_kinds
+                    },
+                    "unresolved_candidates": unresolved_candidate_count,
+                    "targeted_rest_unaligned": self.empty_side_rest_unaligned,
+                    "targeted_rest_diagnostics": dict(
+                        sorted(self.empty_side_rest_diagnostics.items())
+                    ),
+                    "confirmation_rule": (
+                        "A candidate kind is supported only after at least one public "
+                        "REST /book response exactly matches full reconstructed depth "
+                        "across an unchanged session/state-version request window and "
+                        "the relevant REST side is empty. Every other REST outcome "
+                        "remains diagnostic and UNRESOLVED."
+                    ),
+                    "candidates": self.empty_side_candidates,
+                },
+                "component_statuses": {
+                    "nonzero_aggregate_replacement": (
+                        "CONFIRMED"
+                        if self.validated_nonzero_replacements > 0
+                        else "UNRESOLVED"
+                    ),
+                    "zero_size_delete": (
+                        "CONFIRMED"
+                        if self.validated_zero_deletes > 0
+                        else "UNRESOLVED"
+                    ),
+                    "buy_bid_sell_ask": (
+                        "CONFIRMED"
+                        if self.side_updates["BUY"] > 0
+                        and self.side_updates["SELL"] > 0
+                        and self.comparison_mismatches == 0
+                        else "CONTRADICTED"
+                        if self.direct_comparison_mismatches
+                        else "UNRESOLVED"
+                    ),
+                    "event_best_prices": (
+                        "CONTRADICTED"
+                        if self.direct_comparison_mismatches
+                        else "CONFIRMED"
+                        if self.comparison_entries > 0
+                        and self.comparison_mismatches == 0
+                        and empty_side_requirement_met
+                        else "UNRESOLVED"
+                    ),
+                    "empty_side_boundary_candidates": (
+                        empty_side_interpretation_status
+                        if self.empty_side_candidates
+                        else "NOT_OBSERVED"
+                    ),
+                },
                 "validation_note": (
                     "Best-price agreement alone cannot distinguish aggregate replacement "
                     "from arithmetic increment. Independent validation requires exact full-"
@@ -1758,7 +2153,23 @@ class ContractAnalyzer:
                 "adjacent_same_timestamp_events": self.same_timestamp_adjacent,
                 "same_timestamp_groups": same_groups[:20],
                 "source_after_local_receive": self.future_timestamps,
-                "delay_ms_local_clock_dependent": {
+                "processing_order": {
+                    "websocket_records_observed": self.websocket_records_observed,
+                    "ingest_sequence_regressions": (
+                        self.websocket_ingest_sequence_regressions
+                    ),
+                    "records_with_received_monotonic_ns": (
+                        self.websocket_monotonic_timestamps_observed
+                    ),
+                    "received_monotonic_ns_regressions": (
+                        self.websocket_monotonic_receive_regressions
+                    ),
+                    "scope_note": (
+                        "These counters measure probe processing order only; they do "
+                        "not establish gap-free network delivery."
+                    ),
+                },
+                "probe_observed_source_to_processing_delay_ms": {
                     "quantile_method": "nearest-rank without interpolation",
                     "count": len(delays),
                     "min": decimal_text(delays[0]) if delays else None,
@@ -1766,6 +2177,17 @@ class ContractAnalyzer:
                     "p95": decimal_text(_quantile(delays, Decimal("0.95"))),
                     "max": decimal_text(delays[-1]) if delays else None,
                 },
+                "delay_measurement_definition": (
+                    "Local UTC received_at minus the event source timestamp, sampled "
+                    "after the WebSocket receive completed and before the current raw "
+                    "frame's durable write."
+                ),
+                "delay_caveat": (
+                    "This probe-observed source-to-processing delay is contaminated "
+                    "by local clock offset, event-loop scheduling, socket/library "
+                    "buffering, backpressure, and synchronous flush/fsync in the "
+                    "receive path. It is not a venue/network latency estimate."
+                ),
                 "counterexamples": self.timestamp_counterexamples,
             },
             "errors": {

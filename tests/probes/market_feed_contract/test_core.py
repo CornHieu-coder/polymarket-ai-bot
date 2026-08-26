@@ -31,13 +31,20 @@ def fixture(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
 
 
-def record(sequence: int, payload: dict, digest_suffix: str = "") -> dict:
+def record(
+    sequence: int,
+    payload: dict,
+    digest_suffix: str = "",
+    *,
+    received_monotonic_ns: int | None = None,
+) -> dict:
     raw = json.dumps(payload, separators=(",", ":")) + digest_suffix
     return {
         "ingest_sequence": sequence,
         "received_at": RECEIVED_AT,
         "raw_payload_sha256": hashlib.sha256(raw.encode()).hexdigest(),
         "parse_status": "ok",
+        "received_monotonic_ns": received_monotonic_ns,
     }
 
 
@@ -110,10 +117,15 @@ class EvidenceStoreTests(unittest.TestCase):
                 status_code=200,
                 raw_response=body,
                 elapsed_ms="1.25",
+                request_context={"request_purpose": "fixture", "candidate_id": "c1"},
             )
             store.close()
         self.assertEqual(base64.b64decode(stored["raw_response"]), body)
         self.assertEqual(decoded["unknown"], "exact")
+        self.assertEqual(
+            stored["request_context"],
+            {"request_purpose": "fixture", "candidate_id": "c1"},
+        )
 
 
 class DecimalAndBookTests(unittest.TestCase):
@@ -171,6 +183,51 @@ class AnalyzerTests(unittest.TestCase):
         self.analyzer = ContractAnalyzer([TOKEN])
         self.analyzer.start_session("session-001")
 
+    def observe_empty_ask_boundary_candidate(self) -> dict:
+        book = deepcopy(self.book)
+        book["asks"] = [{"price": "0.60", "size": "12.00"}]
+        self.analyzer.observe_websocket(record(1, book), book)
+        change = {
+            "event_type": "price_change",
+            "market": book["market"],
+            "timestamp": str(int(book["timestamp"]) + 1),
+            "price_changes": [
+                {
+                    "asset_id": TOKEN,
+                    "price": "0.60",
+                    "size": "0",
+                    "side": "SELL",
+                    "hash": "fixture-empty-ask",
+                    "best_bid": "0.40",
+                    "best_ask": "1",
+                }
+            ],
+        }
+        self.analyzer.observe_websocket(record(2, change), change)
+        return self.analyzer.take_empty_side_probe_requests()[0]
+
+    def aligned_rest_record(
+        self,
+        *,
+        sequence: int,
+        context: dict | None = None,
+        stable: bool = True,
+    ) -> dict:
+        version = self.analyzer.state_versions[TOKEN]
+        return {
+            "ingest_sequence": sequence,
+            "status_code": 200,
+            "token_id": TOKEN,
+            "parse_status": "ok",
+            "state_version_before": version,
+            "state_version_after": version if stable else version + 1,
+            "state_session_before": "session-001",
+            "state_session_after": "session-001",
+            "state_valid_before": True,
+            "state_valid_after": True,
+            "request_context": context or {"request_purpose": "periodic_poll"},
+        }
+
     def test_malformed_state_change_is_recorded_without_state_mutation(self) -> None:
         self.analyzer.observe_websocket(record(1, self.book), self.book)
         before = deepcopy(self.analyzer.states[TOKEN].bids)
@@ -217,6 +274,114 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(fields["price_changes[].best_bid"]["event_presence"], 2)
         self.assertEqual(fields["price_changes[].best_bid"]["occurrences"], 2)
 
+    def test_empty_ask_one_is_a_traceable_candidate_not_an_integrity_failure(self) -> None:
+        context = self.observe_empty_ask_boundary_candidate()
+        state = self.analyzer.states[TOKEN]
+        self.assertTrue(state.valid)
+        self.assertIsNone(state.best_ask)
+        self.assertEqual(context["candidate_kind"], "ask_one_when_empty")
+        self.assertEqual(self.analyzer.comparison_mismatches, 0)
+        q3 = self.analyzer.summary({}, {})["q3"]
+        interpretation = q3["empty_side_boundary_interpretation"]
+        self.assertEqual(interpretation["status"], "UNRESOLVED")
+        self.assertEqual(interpretation["observed_candidates"], 1)
+        self.assertEqual(interpretation["unresolved_candidates"], 1)
+
+    def test_empty_bid_zero_is_a_traceable_candidate(self) -> None:
+        book = deepcopy(self.book)
+        book["bids"] = [{"price": "0.40", "size": "10.00"}]
+        self.analyzer.observe_websocket(record(1, book), book)
+        change = {
+            "event_type": "price_change",
+            "market": book["market"],
+            "timestamp": str(int(book["timestamp"]) + 1),
+            "price_changes": [
+                {
+                    "asset_id": TOKEN,
+                    "price": "0.40",
+                    "size": "0",
+                    "side": "BUY",
+                    "hash": "fixture-empty-bid",
+                    "best_bid": "0",
+                    "best_ask": "0.60",
+                }
+            ],
+        }
+        self.analyzer.observe_websocket(record(2, change), change)
+        context = self.analyzer.take_empty_side_probe_requests()[0]
+        self.assertEqual(context["candidate_kind"], "bid_zero_when_empty")
+        self.assertTrue(self.analyzer.states[TOKEN].valid)
+        self.assertIsNone(self.analyzer.states[TOKEN].best_bid)
+
+    def test_exact_stable_rest_empty_side_confirms_only_bounded_candidate(self) -> None:
+        context = self.observe_empty_ask_boundary_candidate()
+        rest = deepcopy(self.book)
+        rest.pop("event_type")
+        rest["asks"] = []
+        self.analyzer.observe_rest(
+            self.aligned_rest_record(sequence=3, context=context), rest
+        )
+        q3 = self.analyzer.summary({}, {})["q3"]
+        interpretation = q3["empty_side_boundary_interpretation"]
+        self.assertEqual(interpretation["status"], "CONFIRMED")
+        self.assertEqual(interpretation["confirmed_kinds"], {"ask_one_when_empty": 1})
+        self.assertEqual(interpretation["unresolved_candidates"], 0)
+        self.assertIn("never normalized globally", interpretation["scope"])
+
+    def test_rest_mismatch_leaves_empty_side_candidate_unresolved(self) -> None:
+        context = self.observe_empty_ask_boundary_candidate()
+        rest = deepcopy(self.book)
+        rest.pop("event_type")
+        self.analyzer.observe_rest(
+            self.aligned_rest_record(sequence=3, context=context), rest
+        )
+        interpretation = self.analyzer.summary({}, {})["q3"][
+            "empty_side_boundary_interpretation"
+        ]
+        self.assertEqual(interpretation["status"], "UNRESOLVED")
+        self.assertEqual(interpretation["unresolved_candidates"], 1)
+        self.assertEqual(
+            interpretation["targeted_rest_diagnostics"],
+            {"aligned_full_depth_mismatch": 1},
+        )
+        self.assertTrue(self.analyzer.states[TOKEN].valid)
+
+    def test_unaligned_rest_leaves_empty_side_candidate_unresolved(self) -> None:
+        context = self.observe_empty_ask_boundary_candidate()
+        rest = deepcopy(self.book)
+        rest.pop("event_type")
+        rest["asks"] = []
+        self.analyzer.observe_rest(
+            self.aligned_rest_record(sequence=3, context=context, stable=False), rest
+        )
+        interpretation = self.analyzer.summary({}, {})["q3"][
+            "empty_side_boundary_interpretation"
+        ]
+        self.assertEqual(interpretation["status"], "UNRESOLVED")
+        self.assertEqual(interpretation["targeted_rest_unaligned"], 1)
+
+    def test_numeric_boundary_is_not_globally_normalized(self) -> None:
+        self.analyzer.observe_websocket(record(1, self.book), self.book)
+        change = deepcopy(self.change)
+        change["price_changes"][0]["best_ask"] = "1"
+        self.analyzer.observe_websocket(record(2, change), change)
+        self.assertFalse(self.analyzer.states[TOKEN].valid)
+        self.assertEqual(self.analyzer.comparison_mismatches, 1)
+        self.assertEqual(self.analyzer.empty_side_candidate_entries, 0)
+
+    def test_genuine_bbo_mismatch_fails_closed_and_excludes_followup(self) -> None:
+        self.analyzer.observe_websocket(record(1, self.book), self.book)
+        mismatch = deepcopy(self.change)
+        mismatch["price_changes"][0]["best_bid"] = "0.49"
+        self.analyzer.observe_websocket(record(2, mismatch), mismatch)
+        followup = deepcopy(self.change)
+        followup["timestamp"] = str(int(followup["timestamp"]) + 1)
+        self.analyzer.observe_websocket(record(3, followup), followup)
+        q3 = self.analyzer.summary({}, {})["q3"]
+        self.assertEqual(q3["status"], "CONTRADICTED")
+        self.assertEqual(q3["genuine_mismatches"], 1)
+        self.assertEqual(q3["excluded_change_entries"], 1)
+
     def test_schema_records_unexpected_nested_fields(self) -> None:
         event = deepcopy(self.book)
         event["future"] = {"nested": [{"sequence_id": 9, "value": "x"}]}
@@ -238,6 +403,54 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(q4["duplicate_asset_side_price_frames"], 1)
         self.assertEqual(q4["order_sensitive_frames"], 1)
 
+    def test_multi_asset_frame_is_not_blanket_bbo_ambiguity(self) -> None:
+        second_token = "98765432109876543210"
+        analyzer = ContractAnalyzer([TOKEN, second_token])
+        analyzer.start_session("session-001")
+        first_book = deepcopy(self.book)
+        second_book = deepcopy(self.book)
+        second_book["asset_id"] = second_token
+        analyzer.observe_websocket(record(1, first_book), first_book)
+        analyzer.observe_websocket(record(2, second_book), second_book)
+        event = deepcopy(self.change)
+        second_change = deepcopy(event["price_changes"][0])
+        second_change["asset_id"] = second_token
+        second_change["best_bid"] = "0.49"
+        event["price_changes"].append(second_change)
+        analyzer.observe_websocket(record(3, event), event)
+        q3 = analyzer.summary({}, {})["q3"]
+        q4 = analyzer.summary({}, {})["q4"]
+        self.assertEqual(q3["direct_single-entry_mismatches"], 1)
+        self.assertEqual(q3["status"], "CONTRADICTED")
+        self.assertEqual(q4["multi_entry_frames"], 1)
+        self.assertEqual(q4["multi_same_asset_frames"], 0)
+        self.assertFalse(
+            analyzer.comparison_counterexamples[0][
+                "multi_entry_semantics_ambiguous"
+            ]
+        )
+
+    def test_same_level_update_supersedes_prior_independent_validation_claim(self) -> None:
+        self.analyzer.observe_websocket(record(1, self.book), self.book)
+        first = deepcopy(self.change)
+        first["price_changes"][0].update(
+            {"price": "0.40", "size": "8", "best_bid": "0.40"}
+        )
+        second = deepcopy(first)
+        second["timestamp"] = str(int(first["timestamp"]) + 1)
+        second["price_changes"][0]["size"] = "7"
+        self.analyzer.observe_websocket(record(2, first), first)
+        self.analyzer.observe_websocket(record(3, second), second)
+
+        rest = deepcopy(self.book)
+        rest.pop("event_type")
+        rest["bids"][0]["size"] = "7"
+        self.analyzer.observe_rest(self.aligned_rest_record(sequence=4), rest)
+        q3 = self.analyzer.summary({}, {})["q3"]
+        self.assertEqual(q3["discriminating_nonzero_updates"], 2)
+        self.assertEqual(q3["superseded_before_validation"], 1)
+        self.assertEqual(q3["independently_validated_nonzero_replacements"], 1)
+
     def test_two_sessions_require_fresh_book_and_later_delta(self) -> None:
         for number in (1, 2):
             if number == 2:
@@ -250,6 +463,22 @@ class AnalyzerTests(unittest.TestCase):
             self.analyzer.end_session(session, controlled_disconnect=True)
         q2 = self.analyzer.summary({}, {})["q2"]
         self.assertEqual(q2["status"], "CONFIRMED")
+
+    def test_two_sessions_without_clean_controlled_reconnect_remain_unresolved(self) -> None:
+        for number in (1, 2):
+            if number == 2:
+                self.analyzer.start_session("session-002")
+            session = f"session-{number:03d}"
+            self.analyzer.observe_websocket(record(number * 10, self.book), self.book)
+            change = deepcopy(self.change)
+            change["timestamp"] = str(int(change["timestamp"]) + number)
+            self.analyzer.observe_websocket(record(number * 10 + 1, change), change)
+            self.analyzer.end_session(
+                session, controlled_disconnect=number != 1
+            )
+        q2 = self.analyzer.summary({}, {})["q2"]
+        self.assertEqual(q2["status"], "UNRESOLVED")
+        self.assertFalse(q2["clean_controlled_reconnect"])
 
     def test_delta_before_book_contradicts_reconnect_ordering(self) -> None:
         self.analyzer.observe_websocket(record(1, self.change), self.change)
@@ -272,6 +501,47 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(q8["adjacent_same_timestamp_events"], 1)
         self.assertEqual(q8["source_timestamp_regressions"], 1)
         self.assertEqual(q8["status"], "CONTRADICTED")
+
+    def test_q8_reports_probe_receive_order_without_gap_free_claim(self) -> None:
+        first = record(1, self.book, received_monotonic_ns=100)
+        second_book = deepcopy(self.book)
+        second_book["timestamp"] = str(int(self.book["timestamp"]) + 1)
+        second = record(2, second_book, received_monotonic_ns=200)
+        self.analyzer.observe_websocket(first, self.book)
+        self.analyzer.observe_websocket(second, second_book)
+        q8 = self.analyzer.summary({}, {})["q8"]
+        self.assertEqual(
+            q8["processing_order"],
+            {
+                "websocket_records_observed": 2,
+                "ingest_sequence_regressions": 0,
+                "records_with_received_monotonic_ns": 2,
+                "received_monotonic_ns_regressions": 0,
+                "scope_note": (
+                    "These counters measure probe processing order only; they do not "
+                    "establish gap-free network delivery."
+                ),
+            },
+        )
+        self.assertIn(
+            "not a venue/network latency estimate", q8["delay_caveat"]
+        )
+
+    def test_q8_receive_order_regression_is_explicitly_contradicted(self) -> None:
+        self.analyzer.observe_websocket(
+            record(2, self.book, received_monotonic_ns=200), self.book
+        )
+        later = deepcopy(self.book)
+        later["timestamp"] = str(int(self.book["timestamp"]) + 1)
+        self.analyzer.observe_websocket(
+            record(1, later, received_monotonic_ns=100), later
+        )
+        q8 = self.analyzer.summary({}, {})["q8"]
+        self.assertEqual(q8["status"], "CONTRADICTED")
+        self.assertEqual(q8["processing_order"]["ingest_sequence_regressions"], 1)
+        self.assertEqual(
+            q8["processing_order"]["received_monotonic_ns_regressions"], 1
+        )
 
     def test_stable_window_rest_exact_depth_comparison(self) -> None:
         self.analyzer.observe_websocket(record(1, self.book), self.book)

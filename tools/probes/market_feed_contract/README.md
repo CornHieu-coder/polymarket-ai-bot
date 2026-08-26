@@ -12,7 +12,9 @@ replay engine.
 - WebSocket redirects, HTTP redirects, environment proxies, credential-bearing
   headers, authenticated channels, and arbitrary endpoint overrides are refused.
 - The only outbound WebSocket messages are the documented market subscription
-  and `PING` heartbeat.
+  and `PING` heartbeat. The corrective subscription sends exactly `assets_ids`
+  and `type`; optional fields and their documented defaults are recorded as
+  omitted rather than asserted as explicit values.
 
 ## Probe-only dependencies
 
@@ -41,9 +43,12 @@ three minutes, polls REST every 15 seconds, and makes one clean controlled
 reconnect midway through the run.
 
 ```text
-python -m tools.probes.market_feed_contract --token-id TOKEN_ID_1 --token-id TOKEN_ID_2 --duration-seconds 180 --rest-interval-seconds 15 --offline-test-result "offline suite passed"
+python -m tools.probes.market_feed_contract --token-id TOKEN_ID_1 --token-id TOKEN_ID_2 --duration-seconds 180 --rest-interval-seconds 15 --offline-test-result "offline suite passed" --baseline-summary outputs/market-feed-contract/ORIGINAL_RUN_ID/summary.json
 ```
 
 Raw evidence and the machine-readable summary are written beneath the ignored
-`outputs/market-feed-contract/` path. The deterministic derived Markdown report
-is written to `docs/experiments/market-feed-contract-probe.md`.
+`outputs/market-feed-contract/` path. When `--baseline-summary` is supplied, its
+path must remain under ignored `outputs/`; its bytes are hashed into corrective
+provenance, an individual corrective report is kept in the new ignored run
+directory, and the deterministic historical/corrective Markdown comparison is
+written to `docs/experiments/market-feed-contract-probe.md`.

@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import unittest
 
-from tools.probes.market_feed_contract.report import render_report
+from tools.probes.market_feed_contract.report import (
+    Q8_DELAY_LIMITATION,
+    render_comparative_report,
+    render_report,
+)
 
 
 def minimal_summary() -> dict:
@@ -49,6 +54,123 @@ def minimal_summary() -> dict:
     }
 
 
+def comparative_summaries() -> tuple[dict, dict]:
+    original = minimal_summary()
+    original["run"]["run_id"] = "historical-run-id"
+    original["run"]["raw_evidence_path"] = "outputs/original"
+    original["evidence"]["run_directory"] = "outputs/original"
+    original["evidence"]["manifest"] = {
+        "algorithm": "sha256",
+        "files": {
+            "historical-raw.jsonl": {
+                "bytes": 11,
+                "sha256": "historical-sha256",
+            }
+        },
+    }
+    original["q2"]["status"] = "CONFIRMED"
+    original["q3"].update(
+        {
+            "observed_change_entries": 12,
+            "applied_change_entries": 5,
+            "excluded_change_entries": 7,
+            "counterexamples": [
+                {
+                    "ingest_sequence": 41,
+                    "reason": "historical-empty-side-boundary",
+                }
+            ],
+        }
+    )
+    original["errors"] = {
+        "counts": {"price_change_without_valid_book": 7},
+        "examples": [
+            {
+                "code": "price_change_without_valid_book",
+                "ingest_sequence": 42,
+            }
+        ],
+    }
+
+    corrective = deepcopy(original)
+    corrective["probe_version"] = "0.2.0"
+    corrective["run"].update(
+        {
+            "run_id": "corrective-run-id",
+            "raw_evidence_path": "outputs/corrective",
+            "market_subscription_payload": {
+                "assets_ids": ["123"],
+                "type": "market",
+            },
+            "market_subscription_fields": ["assets_ids", "type"],
+            "initial_dump_field_sent": False,
+            "level_field_sent": False,
+            "subscription_control": (
+                "minimal documented payload; documented defaults relied upon"
+            ),
+            "baseline_run_id": "historical-run-id",
+            "baseline_summary_path": "outputs/original/summary.json",
+            "baseline_summary_sha256": "baseline-summary-sha256",
+        }
+    )
+    del corrective["run"]["initial_dump"]
+    del corrective["run"]["websocket_level"]
+    corrective["evidence"]["run_directory"] = "outputs/corrective"
+    corrective["evidence"]["manifest"] = {
+        "algorithm": "sha256",
+        "files": {
+            "corrective-raw.jsonl": {
+                "bytes": 13,
+                "sha256": "corrective-sha256",
+            }
+        },
+    }
+    corrective["q2"]["status"] = "UNRESOLVED"
+    corrective["q3"].update(
+        {
+            "observed_change_entries": 18,
+            "applied_change_entries": 16,
+            "excluded_change_entries": 2,
+            "genuine_mismatches": 0,
+            "superseded_before_validation": 3,
+            "empty_side_boundary_interpretation": {
+                "status": "CONFIRMED",
+                "scope": "Confirmed only for aligned candidates in this run.",
+                "observed_candidates": 2,
+                "observed_kinds": {
+                    "ask_one_when_empty": 1,
+                    "bid_zero_when_empty": 1,
+                },
+                "confirmed_candidates": 1,
+                "confirmed_kinds": {"ask_one_when_empty": 1},
+                "unresolved_candidates": 1,
+                "targeted_rest_unaligned": 1,
+                "targeted_rest_diagnostics": 2,
+                "candidates": [
+                    {
+                        "candidate_id": "17:0:best_ask",
+                        "rest_validation": "CONFIRMED",
+                    }
+                ],
+            },
+            "counterexamples": [
+                {
+                    "ingest_sequence": 99,
+                    "reason": "corrective-diagnostic",
+                }
+            ],
+        }
+    )
+    old_delays = corrective["q8"].pop("delay_ms_local_clock_dependent")
+    corrective["q8"]["probe_observed_source_to_processing_delay_ms"] = old_delays
+    corrective["q8"]["processing_order"] = {
+        "raw_flush_before_received_at": True,
+        "synchronous_fsync": True,
+    }
+    corrective["errors"] = {"counts": {}, "examples": []}
+    return original, corrective
+
+
 class ReportTests(unittest.TestCase):
     def test_report_rendering_is_deterministic(self) -> None:
         summary = minimal_summary()
@@ -63,6 +185,56 @@ class ReportTests(unittest.TestCase):
         self.assertIn("No authenticated endpoint", report)
         self.assertIn("cannot establish gap-free", report)
         self.assertIn("not a trading-performance result", report)
+
+    def test_render_report_accepts_corrective_summary_fields(self) -> None:
+        _, corrective = comparative_summaries()
+        report = render_report(corrective)
+        self.assertIn("omitted; documented default relied upon", report)
+        self.assertIn("Corrective-run baseline provenance", report)
+        self.assertIn("Empty-side boundary observations", report)
+        self.assertIn(Q8_DELAY_LIMITATION, report)
+
+    def test_comparative_report_is_json_round_trip_deterministic(self) -> None:
+        original, corrective = comparative_summaries()
+        round_trip_original = json.loads(json.dumps(original, sort_keys=True))
+        round_trip_corrective = json.loads(json.dumps(corrective, sort_keys=True))
+        self.assertEqual(
+            render_comparative_report(original, corrective),
+            render_comparative_report(round_trip_original, round_trip_corrective),
+        )
+
+    def test_comparative_report_preserves_both_runs_and_counterexamples(self) -> None:
+        original, corrective = comparative_summaries()
+        report = render_comparative_report(original, corrective)
+        self.assertIn("historical-run-id", report)
+        self.assertIn("corrective-run-id", report)
+        self.assertIn("historical-raw.jsonl", report)
+        self.assertIn("corrective-raw.jsonl", report)
+        self.assertIn("CONFIRMED -> UNRESOLVED", report)
+        self.assertIn("Q3 exclusions preserved: **7** of **12**", report)
+        self.assertIn("historical-empty-side-boundary", report)
+        self.assertIn("corrective-diagnostic", report)
+        self.assertIn("Established", report)
+        self.assertIn("Suggested", report)
+        self.assertIn("Project-derived", report)
+        self.assertIn("new aggregate size", report)
+        self.assertIn("empty string as the raw absent-value form", report)
+        self.assertIn("initial_dump", report)
+        self.assertIn("level", report)
+        self.assertIn("not claim that numeric 0/1 values are universal", report)
+        self.assertIn("Per-question evidence, differences, and applicability", report)
+        for index in range(1, 9):
+            self.assertIn(f"### Q{index} —", report)
+        self.assertIn("## Deviations from IP-001", report)
+        self.assertIn("No authenticated endpoint", report)
+
+    def test_comparative_report_does_not_claim_latency_estimation(self) -> None:
+        original, corrective = comparative_summaries()
+        report = render_comparative_report(original, corrective)
+        self.assertIn(Q8_DELAY_LIMITATION, report)
+        self.assertIn("neither distribution estimates venue or network latency", report)
+        self.assertNotIn("venue latency was", report.lower())
+        self.assertNotIn("network latency was", report.lower())
 
 
 if __name__ == "__main__":

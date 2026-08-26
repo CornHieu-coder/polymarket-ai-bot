@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import importlib.metadata
 import json
 import subprocess
@@ -19,7 +20,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import httpx
 from websockets.asyncio.client import connect
@@ -35,7 +36,7 @@ from .core import (
     write_json_once,
     write_summary,
 )
-from .report import render_report, write_report
+from .report import render_comparative_report, render_report, write_report
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -81,6 +82,7 @@ class ProbeConfig:
     heartbeat_interval_seconds: int = 10
     heartbeat_timeout_seconds: int = 12
     rest_timeout_seconds: int = 8
+    baseline_summary_path: Path | None = None
 
     def validate(self) -> None:
         if not 1 <= len(self.token_ids) <= 10:
@@ -97,6 +99,21 @@ class ProbeConfig:
         ignored_root = (REPO_ROOT / "outputs").resolve()
         if not resolved_output.is_relative_to(ignored_root):
             raise ValueError(f"output root must remain under ignored path {ignored_root}")
+        if self.baseline_summary_path is not None:
+            resolved_baseline = self.baseline_summary_path.resolve()
+            if not resolved_baseline.is_relative_to(ignored_root):
+                raise ValueError(
+                    f"baseline summary must remain under ignored path {ignored_root}"
+                )
+            if not resolved_baseline.is_file():
+                raise ValueError(f"baseline summary does not exist: {resolved_baseline}")
+
+
+@dataclass(frozen=True)
+class WebSocketSessionResult:
+    connection_opened: bool
+    subscription_sent: bool
+    controlled_disconnect: bool
 
 
 def market_subscription(token_ids: Sequence[str]) -> dict[str, Any]:
@@ -105,9 +122,21 @@ def market_subscription(token_ids: Sequence[str]) -> dict[str, Any]:
     return {
         "assets_ids": list(token_ids),
         "type": "market",
-        "initial_dump": True,
-        "level": 2,
-        "custom_feature_enabled": False,
+    }
+
+
+def market_subscription_metadata(token_ids: Sequence[str]) -> dict[str, Any]:
+    """Describe the exact subscription sent without asserting omitted defaults."""
+
+    payload = market_subscription(token_ids)
+    return {
+        "market_subscription_payload": payload,
+        "market_subscription_fields": list(payload),
+        "assets_ids_field_sent": True,
+        "type_field_sent": True,
+        "initial_dump_field_sent": False,
+        "level_field_sent": False,
+        "custom_feature_enabled_field_sent": False,
     }
 
 
@@ -176,6 +205,19 @@ def software_provenance() -> dict[str, Any]:
     }
 
 
+def load_baseline_summary(path: Path) -> tuple[dict[str, Any], str]:
+    """Load one explicitly named ignored summary and return its content digest."""
+
+    try:
+        raw = path.read_bytes()
+        decoded = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"cannot load baseline summary {path}: {exc}") from exc
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("run"), dict):
+        raise ValueError("baseline summary must be a JSON object with a run object")
+    return decoded, hashlib.sha256(raw).hexdigest()
+
+
 def _elapsed_ms(start_ns: int, end_ns: int) -> str:
     return format(Decimal(end_ns - start_ns) / Decimal(1_000_000), "f")
 
@@ -185,7 +227,10 @@ async def fetch_public_book(
     store: EvidenceStore,
     analyzer: ContractAnalyzer,
     token_id: str,
+    *,
+    request_context: Mapping[str, Any] | None = None,
 ) -> None:
+    context = dict(request_context or {"request_purpose": "periodic_poll"})
     before_version = analyzer.state_versions[token_id]
     before_session = analyzer.current_session
     before_state = analyzer.states.get(token_id)
@@ -202,12 +247,14 @@ async def fetch_public_book(
             endpoint=PUBLIC_BOOK_URL,
             request_started_at=started_at,
             error=type(exc).__name__,
+            request_context=context,
         )
         analyzer.observe_rest_transport_failure(
             ingest_sequence=int(control["ingest_sequence"]),
             token_id=token_id,
             error_kind="rest_timeout",
             message=str(exc),
+            request_context=context,
         )
         return
     except httpx.HTTPError as exc:
@@ -219,12 +266,14 @@ async def fetch_public_book(
             request_started_at=started_at,
             error=type(exc).__name__,
             message=str(exc),
+            request_context=context,
         )
         analyzer.observe_rest_transport_failure(
             ingest_sequence=int(control["ingest_sequence"]),
             token_id=token_id,
             error_kind="rest_transport_error",
             message=str(exc),
+            request_context=context,
         )
         return
 
@@ -251,7 +300,19 @@ async def fetch_public_book(
         state_session_after=after_session,
         state_valid_before=before_valid,
         state_valid_after=after_valid,
+        request_context=context,
     )
+    if response.status_code < 200 or response.status_code >= 300:
+        store.record_control(
+            "rest_non_2xx",
+            token_id=token_id,
+            method="GET",
+            endpoint=PUBLIC_BOOK_URL,
+            status_code=response.status_code,
+            request_started_at=started_at,
+            request_context=context,
+            rest_ingest_sequence=record["ingest_sequence"],
+        )
     analyzer.observe_rest(record, decoded)
 
 
@@ -266,7 +327,13 @@ async def _rest_poller(
         for token_id in config.token_ids:
             if stop.is_set():
                 return
-            await fetch_public_book(client, store, analyzer, token_id)
+            await fetch_public_book(
+                client,
+                store,
+                analyzer,
+                token_id,
+                request_context={"request_purpose": "periodic_poll"},
+            )
         try:
             await asyncio.wait_for(stop.wait(), timeout=config.rest_interval_seconds)
         except TimeoutError:
@@ -284,6 +351,70 @@ async def _cancel_background(task: asyncio.Task[None] | None) -> None:
         pass
 
 
+def _raise_completed_targeted_rest_tasks(tasks: set[asyncio.Task[None]]) -> None:
+    """Surface completed targeted-request failures without blocking WS receive."""
+
+    for task in tuple(tasks):
+        if not task.done():
+            continue
+        tasks.remove(task)
+        task.result()
+
+
+async def _drain_targeted_rest_tasks(tasks: set[asyncio.Task[None]]) -> None:
+    """Finish all issued public reads and surface failures before closing evidence."""
+
+    if not tasks:
+        return
+    pending = tuple(tasks)
+    results = await asyncio.gather(*pending, return_exceptions=True)
+    tasks.difference_update(pending)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+def _schedule_empty_side_probe_requests(
+    *,
+    client: httpx.AsyncClient,
+    store: EvidenceStore,
+    analyzer: ContractAnalyzer,
+    allowed_token_ids: Sequence[str],
+    tasks: set[asyncio.Task[None]],
+) -> None:
+    """Issue analyzer-requested public reads concurrently with WS receiving."""
+
+    allowed = set(allowed_token_ids)
+    for request in analyzer.take_empty_side_probe_requests():
+        context = dict(request)
+        token_id = str(context.get("token_id", ""))
+        if token_id not in allowed:
+            control = store.record_control(
+                "targeted_rest_request_rejected",
+                reason="token_id_not_in_subscription",
+                token_id=token_id,
+                request_context=context,
+            )
+            analyzer.observe_operational_failure(
+                ingest_sequence=int(control["ingest_sequence"]),
+                code="targeted_rest_request_rejected",
+                message="targeted REST token was not in the explicit subscription",
+                details={"token_id": token_id, "request_context": context},
+            )
+            continue
+        task = asyncio.create_task(
+            fetch_public_book(
+                client,
+                store,
+                analyzer,
+                token_id,
+                request_context=context,
+            ),
+            name=f"targeted-public-rest-book-{context.get('candidate_id', token_id)}",
+        )
+        tasks.add(task)
+
+
 async def _run_websocket_session(
     *,
     session_id: str,
@@ -291,18 +422,23 @@ async def _run_websocket_session(
     store: EvidenceStore,
     analyzer: ContractAnalyzer,
     config: ProbeConfig,
+    client: httpx.AsyncClient,
     fatal_task: asyncio.Task[None],
-) -> bool:
+) -> WebSocketSessionResult:
     analyzer.start_session(session_id)
+    subscription_metadata = market_subscription_metadata(config.token_ids)
     store.record_control(
         "websocket_session_started",
         session_id=session_id,
         endpoint=PUBLIC_WS_URL,
         token_ids=list(config.token_ids),
-        initial_dump=True,
+        **subscription_metadata,
     )
+    connection_opened = False
+    subscription_sent = False
     controlled_disconnect = False
     disconnect_error: str | None = None
+    targeted_rest_tasks: set[asyncio.Task[None]] = set()
     try:
         async with FixedEndpointConnect(
             PUBLIC_WS_URL,
@@ -314,15 +450,18 @@ async def _run_websocket_session(
             max_size=8 * 1024 * 1024,
             max_queue=1024,
         ) as websocket:
+            connection_opened = True
             subscription = market_subscription(config.token_ids)
             subscription_text = json.dumps(
                 subscription, ensure_ascii=False, sort_keys=True, separators=(",", ":")
             )
             await websocket.send(subscription_text)
+            subscription_sent = True
             store.record_control(
                 "market_subscription_sent",
                 session_id=session_id,
                 payload=subscription_text,
+                **subscription_metadata,
             )
             loop = asyncio.get_running_loop()
             deadline = loop.time() + duration_seconds
@@ -332,6 +471,7 @@ async def _run_websocket_session(
             while loop.time() < deadline:
                 if fatal_task.done():
                     await fatal_task
+                _raise_completed_targeted_rest_tasks(targeted_rest_tasks)
                 now = loop.time()
                 if now - last_ping >= config.heartbeat_interval_seconds:
                     await websocket.send("PING")
@@ -379,8 +519,16 @@ async def _run_websocket_session(
                         source_ingest_sequence=record["ingest_sequence"],
                         analysis=error,
                     )
+                _schedule_empty_side_probe_requests(
+                    client=client,
+                    store=store,
+                    analyzer=analyzer,
+                    allowed_token_ids=config.token_ids,
+                    tasks=targeted_rest_tasks,
+                )
 
             if disconnect_error is None:
+                await _drain_targeted_rest_tasks(targeted_rest_tasks)
                 controlled_disconnect = True
                 store.record_control(
                     "controlled_disconnect_requested", session_id=session_id
@@ -417,19 +565,35 @@ async def _run_websocket_session(
             controlled_disconnect=controlled_disconnect,
             disconnect_error=disconnect_error,
         )
+        await _drain_targeted_rest_tasks(targeted_rest_tasks)
         store.record_control(
             "websocket_session_ended",
             session_id=session_id,
             controlled_disconnect=controlled_disconnect,
             disconnect_error=disconnect_error,
         )
-    return controlled_disconnect
+    return WebSocketSessionResult(
+        connection_opened=connection_opened,
+        subscription_sent=subscription_sent,
+        controlled_disconnect=controlled_disconnect,
+    )
 
 
 async def capture(config: ProbeConfig) -> dict[str, Any]:
     config.validate()
     run_id = _run_id()
     provenance = software_provenance()
+    subscription_metadata = market_subscription_metadata(config.token_ids)
+    baseline_summary: dict[str, Any] | None = None
+    baseline_provenance: dict[str, Any] = {}
+    if config.baseline_summary_path is not None:
+        baseline_path = config.baseline_summary_path.resolve()
+        baseline_summary, baseline_digest = load_baseline_summary(baseline_path)
+        baseline_provenance = {
+            "baseline_run_id": str(baseline_summary["run"].get("run_id", "")),
+            "baseline_summary_path": str(baseline_path.relative_to(REPO_ROOT)),
+            "baseline_summary_sha256": baseline_digest,
+        }
     initial_config = {
         "run_id": run_id,
         "created_at": utc_now(),
@@ -437,13 +601,20 @@ async def capture(config: ProbeConfig) -> dict[str, Any]:
         "configuration": {
             **asdict(config),
             "output_root": str(config.output_root.resolve()),
+            "baseline_summary_path": (
+                str(config.baseline_summary_path.resolve())
+                if config.baseline_summary_path is not None
+                else None
+            ),
         },
         "software": provenance,
+        "baseline": baseline_provenance,
         "network_policy": {
             "websocket": PUBLIC_WS_URL,
             "websocket_redirects": False,
             "websocket_proxy": False,
             "websocket_outbound_messages": ["market subscription", "PING heartbeat"],
+            **subscription_metadata,
             "rest": PUBLIC_BOOK_URL,
             "rest_methods": ["GET"],
             "rest_redirects": False,
@@ -459,6 +630,7 @@ async def capture(config: ProbeConfig) -> dict[str, Any]:
     completed = False
     stop_rest = asyncio.Event()
     rest_task: asyncio.Task[None] | None = None
+    controlled_reconnects = 0
     try:
         store.write_resolved_config(initial_config)
         store.record_control("run_started", run_id=run_id)
@@ -470,27 +642,37 @@ async def capture(config: ProbeConfig) -> dict[str, Any]:
             session_duration = (
                 config.duration_seconds - config.reconnect_pause_seconds
             ) / 2
-            await _run_websocket_session(
+            first_session = await _run_websocket_session(
                 session_id="session-001",
                 duration_seconds=session_duration,
                 store=store,
                 analyzer=analyzer,
                 config=config,
+                client=client,
                 fatal_task=rest_task,
             )
             store.record_control(
-                "controlled_reconnect_pause",
+                "reconnect_pause",
                 duration_seconds=config.reconnect_pause_seconds,
+                controlled_trigger=first_session.controlled_disconnect,
             )
             await asyncio.sleep(config.reconnect_pause_seconds)
-            await _run_websocket_session(
+            second_session = await _run_websocket_session(
                 session_id="session-002",
                 duration_seconds=session_duration,
                 store=store,
                 analyzer=analyzer,
                 config=config,
+                client=client,
                 fatal_task=rest_task,
             )
+            if first_session.controlled_disconnect and second_session.subscription_sent:
+                controlled_reconnects += 1
+                store.record_control(
+                    "controlled_reconnect_completed",
+                    from_session_id="session-001",
+                    to_session_id="session-002",
+                )
             stop_rest.set()
             await rest_task
         completed = True
@@ -539,9 +721,14 @@ async def capture(config: ProbeConfig) -> dict[str, Any]:
         "offline_test_command": config.offline_test_command,
         "offline_test_result": config.offline_test_result,
         "rest_interval_seconds": config.rest_interval_seconds,
-        "controlled_reconnects": 1,
-        "initial_dump": True,
-        "websocket_level": 2,
+        "controlled_reconnects": controlled_reconnects,
+        **subscription_metadata,
+        "subscription_control": (
+            "Minimal current first-party example payload; optional initial_dump, "
+            "level, and custom_feature_enabled fields omitted so documented "
+            "server defaults, rather than explicit probe controls, govern the run."
+        ),
+        **baseline_provenance,
         "raw_boundary": "WebSocket application text/bytes after protocol decompression",
         "raw_evidence_path": str(store.run_dir.relative_to(REPO_ROOT)),
         "software": provenance,
@@ -556,12 +743,19 @@ async def capture(config: ProbeConfig) -> dict[str, Any]:
     )
     summary_path = store.run_dir / "summary.json"
     write_summary(summary_path, summary)
-    report = render_report(summary)
+    corrective_report_path = store.run_dir / "corrective-report.md"
+    write_report(corrective_report_path, render_report(summary))
+    report = (
+        render_comparative_report(baseline_summary, summary)
+        if baseline_summary is not None
+        else render_report(summary)
+    )
     write_report(REPORT_PATH, report)
     return {
         "run_id": run_id,
         "run_directory": str(store.run_dir),
         "summary_path": str(summary_path),
+        "corrective_report_path": str(corrective_report_path),
         "report_path": str(REPORT_PATH),
         "statuses": {f"Q{index}": summary[f"q{index}"]["status"] for index in range(1, 9)},
     }
@@ -607,6 +801,15 @@ def build_parser() -> argparse.ArgumentParser:
         default="Not supplied to capture command.",
         help="Recorded result of the offline test run completed before capture.",
     )
+    parser.add_argument(
+        "--baseline-summary",
+        type=Path,
+        default=None,
+        help=(
+            "Ignored summary.json from the original run. When supplied, the committed "
+            "report compares that immutable baseline with the corrective run."
+        ),
+    )
     return parser
 
 
@@ -619,6 +822,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_root=args.output_root,
         sample_note=args.sample_note,
         offline_test_result=args.offline_test_result,
+        baseline_summary_path=args.baseline_summary,
     )
     try:
         result = asyncio.run(capture(config))
