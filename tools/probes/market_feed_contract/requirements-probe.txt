@@ -1,0 +1,3 @@
+# Probe-only dependencies. These do not establish the production application stack.
+httpx==0.28.1
+websockets==16.0

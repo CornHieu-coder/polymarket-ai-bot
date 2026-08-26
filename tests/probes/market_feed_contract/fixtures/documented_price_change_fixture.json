@@ -1,0 +1,16 @@
+{
+  "event_type": "price_change",
+  "market": "0xfixture-condition",
+  "price_changes": [
+    {
+      "asset_id": "12345678901234567890",
+      "price": "0.50",
+      "size": "4.25",
+      "side": "BUY",
+      "hash": "fixture-change-not-live",
+      "best_bid": "0.50",
+      "best_ask": "0.60"
+    }
+  ],
+  "timestamp": "1787702400001"
+}
