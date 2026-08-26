@@ -4,10 +4,11 @@ This file is the authoritative map of project documentation. Research should lea
 
 ## Areas
 
-- [`research/`](research/) owns scientific questions, evidence, assumptions, and hypotheses.
+- [`research/`](research/) owns scientific questions, evidence, assumptions, hypotheses, and concise research-derived recall notes.
   - [Principles](research/principles.md)
   - [Hypotheses](research/hypotheses.md)
   - [Assumptions and methodological positions](research/assumptions.md)
+  - [Architecture interview notes](research/architecture-interview-notes.md) — non-authoritative concise recall sheet for resume/interview drills; authoritative design/research documents win on conflict.
 - [`data/`](data/) owns source-of-truth policy, raw-data contracts, replay semantics, provenance, and data-quality rules.
   - [Data documentation map](data/README.md)
   - [Market data and replay protocol](data/market-data-and-replay.md)
