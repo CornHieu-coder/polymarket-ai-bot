@@ -228,6 +228,10 @@ async def fetch_public_book(
         )
         return
 
+    # The public endpoint may set an operational cookie. Retain no server cookie
+    # in the client jar, so the next request remains credential-free and the
+    # request guard continues to reject any outbound Cookie header.
+    client.cookies.clear()
     ended_ns = time.monotonic_ns()
     after_version = analyzer.state_versions[token_id]
     after_session = analyzer.current_session

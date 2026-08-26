@@ -150,6 +150,7 @@ class HttpClientConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn(blocked, request.headers)
             return httpx.Response(
                 200,
+                headers={"Set-Cookie": "operational=discard-me; Path=/"},
                 json={
                     "market": "fixture",
                     "asset_id": "123",
@@ -176,8 +177,11 @@ class HttpClientConfigurationTests(unittest.IsolatedAsyncioTestCase):
                 analyzer = ContractAnalyzer(["123"])
                 analyzer.start_session("session-001")
                 await live.fetch_public_book(client, store, analyzer, "123")
+                await live.fetch_public_book(client, store, analyzer, "123")
                 store.close()
-        self.assertEqual(len(seen), 1)
+        self.assertEqual(len(seen), 2)
+        self.assertTrue(all("cookie" not in request.headers for request in seen))
+        self.assertEqual(list(client.cookies), [])
 
 
 if __name__ == "__main__":
