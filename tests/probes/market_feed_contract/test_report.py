@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from tools.probes.market_feed_contract.report import render_report
@@ -51,7 +52,8 @@ def minimal_summary() -> dict:
 class ReportTests(unittest.TestCase):
     def test_report_rendering_is_deterministic(self) -> None:
         summary = minimal_summary()
-        self.assertEqual(render_report(summary), render_report(summary))
+        json_round_trip = json.loads(json.dumps(summary, sort_keys=True))
+        self.assertEqual(render_report(summary), render_report(json_round_trip))
 
     def test_report_contains_every_question_status_and_safety_caveats(self) -> None:
         report = render_report(minimal_summary())

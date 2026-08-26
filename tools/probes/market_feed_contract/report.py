@@ -66,7 +66,8 @@ def _q_conclusions(summary: Mapping[str, Any]) -> list[str]:
     q7_text = (
         f"Measured optional metadata over {q7['websocket_book_events']} WS book events: "
         + ", ".join(
-            f"{name}={count}" for name, count in q7["optional_field_presence"].items()
+            f"{name}={q7['optional_field_presence'][name]}"
+            for name in sorted(q7["optional_field_presence"])
         )
         + "."
     )
@@ -95,19 +96,43 @@ def _append_counterexamples(lines: list[str], summary: Mapping[str, Any]) -> Non
     duplicate_count = summary["evidence"].get("duplicate_raw_frames", 0)
     if duplicate_count:
         emitted = True
-        lines.append(f"- Raw duplicate frames retained: **{duplicate_count}**.")
+        lines.append(
+            f"- Repeated raw-payload hashes retained: **{duplicate_count}**. This "
+            "all-frame count is not, by itself, evidence of duplicate data events."
+        )
     for index in range(1, 9):
         question = f"q{index}"
         for example in summary[question].get("counterexamples", []):
             emitted = True
             lines.append(f"- Q{index}: `{_json(example)}`")
-    for code, count in summary["errors"]["counts"].items():
+    for code in sorted(summary["errors"]["counts"]):
+        count = summary["errors"]["counts"][code]
         emitted = True
         lines.append(f"- Parser/operational error `{code}`: **{count}** occurrence(s).")
     if summary["errors"]["examples"]:
-        lines.extend(["", "Traceable examples (linked by raw `ingest_sequence`):", ""])
+        lines.extend(
+            [
+                "",
+                "Representative traceable examples (up to three per category, linked "
+                "by raw `ingest_sequence`; complete counts and instances remain in the "
+                "ignored evidence summary):",
+                "",
+            ]
+        )
+        examples_by_code: dict[str, list[Mapping[str, Any]]] = {}
         for example in summary["errors"]["examples"]:
-            lines.append(f"- `{_json(example)}`")
+            examples_by_code.setdefault(str(example.get("code", "uncategorized")), []).append(
+                example
+            )
+        for code in sorted(examples_by_code):
+            examples = examples_by_code[code]
+            for example in examples[:3]:
+                lines.append(f"- `{_json(example)}`")
+            if len(examples) > 3:
+                lines.append(
+                    f"- `{code}`: {len(examples) - 3} additional traceable instance(s) "
+                    "retained outside Git."
+                )
     if not emitted:
         lines.append("No significant counterexample or parser/operational error was observed.")
     lines.append("")
@@ -344,7 +369,8 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "| --- | ---: | ---: |",
         ]
     )
-    for field_name, present in q6["expected_field_presence"].items():
+    for field_name in sorted(q6["expected_field_presence"]):
+        present = q6["expected_field_presence"][field_name]
         lines.append(
             f"| `{field_name}` | {present} | {q6['expected_field_missing'][field_name]} |"
         )
@@ -374,7 +400,8 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "| --- | ---: |",
         ]
     )
-    for field_name, count in q7["optional_field_presence"].items():
+    for field_name in sorted(q7["optional_field_presence"]):
+        count = q7["optional_field_presence"][field_name]
         lines.append(f"| `{field_name}` | {count} |")
     lines.extend(["", q7["scope_note"], ""])
 
@@ -420,7 +447,8 @@ def render_report(summary: Mapping[str, Any]) -> str:
             "| --- | ---: | --- |",
         ]
     )
-    for name, detail in summary["evidence"]["manifest"]["files"].items():
+    for name in sorted(summary["evidence"]["manifest"]["files"]):
+        detail = summary["evidence"]["manifest"]["files"][name]
         lines.append(f"| `{name}` | {detail['bytes']} | `{detail['sha256']}` |")
     lines.extend(
         [
