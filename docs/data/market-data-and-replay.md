@@ -448,6 +448,77 @@ These require a bounded empirical feed-contract probe before the full replay eng
 7. Can point-in-time fee/min-order metadata for the historical pmxt period be recovered with sufficient reliability for H2 execution simulation?
 8. What historical gap metadata can be obtained from pmxt beyond the Parquet files themselves?
 
+### IP-001 observed results under research review (2026-08-26 UTC)
+
+These are bounded experiment results, not silently frozen replay rules. The
+preserved historical run is `20260826T015136.607229Z-45c482c8`; the final
+corrective run is `20260826T165706.583173Z-309ba088`. An intermediate corrective
+sample, `20260826T165055.566599Z-84d473ac`, was preserved as inconclusive because
+two reused token IDs returned REST 404 and produced no WebSocket books.
+
+- **Ordering fields remain unresolved.** The corrective run observed 80 logical
+  events across `book`, `price_change`, and `last_trade_price` without a candidate
+  sequence field.
+  This is non-observation in four tokens over 185.328 seconds, not evidence that
+  such a field can never appear.
+- **Non-zero aggregate replacement and zero deletion were confirmed for the
+  bounded corrective sample.** All 138 observed changes were applied with zero
+  exclusions and zero genuine best-bid/ask mismatches. The sample included 128
+  non-zero updates, 10 zero-size updates, both BUY and SELL, 89 independently
+  REST-validated discriminating non-zero replacements, and 3 independently
+  REST-validated zero deletions. Thirty-six earlier discriminating effects were
+  correctly classified as superseded before validation rather than over-credited.
+- **Numeric empty-side boundary values have bounded empirical support, not a
+  universal protocol definition.** Four `best_ask="1"` observations coincided
+  with a locally empty ask side and four `best_bid="0"` observations coincided
+  with a locally empty bid side. Each of the eight candidate states received an
+  immediate public REST `GET /book` response that exactly matched full depth
+  across an unchanged session/state-version window and had the relevant REST
+  side empty. Current first-party materials found during review do not explicitly
+  define numeric 1/0 as sentinels, while current official TypeScript bindings
+  document an empty string for an absent optional best price. Therefore the
+  probe's 1/0 interpretation remains explicit, observation-bounded, and must not
+  be promoted to a global production replay rule without review.
+- **Hash semantics remain unresolved.** Required metadata was absent from the
+  WebSocket payload/state for every official-algorithm attempt. The same official
+  algorithm reproduced all 121 eligible REST summaries, but that does not define
+  WebSocket `book.hash` or `price_change.hash` semantics.
+- **Repeated-key frame semantics remain unresolved.** The run observed 69
+  two-entry frames, all containing one entry for each of two different assets;
+  no same-asset or repeated asset/side/price key was observed. The corrective
+  analyzer no longer labels different-asset multi-entry frames as order-ambiguous.
+- **Optional WebSocket metadata remains sample-bounded and unresolved.** Across
+  10 `book` events, `tick_size` and `last_trade_price` appeared 8 times each;
+  `min_order_size` and `neg_risk` appeared zero times. Absence is not universal.
+- **Fresh-book-before-delta was confirmed only for the named reconnect test.**
+  The corrective run sent exactly the minimal subscription fields `assets_ids`
+  and `type`, completed two sessions and one clean controlled reconnect, and
+  observed a fresh `book` before later deltas for all four tokens in both
+  sessions. This is not a universal guarantee about default server behavior.
+- **REST shape/alignment was confirmed for this run.** All 121 public `GET /book`
+  responses were 2xx and exposed the five expected fields; all 114 eligible
+  stable-window full-depth comparisons matched exactly. Seven unaligned responses
+  remained diagnostics.
+- **Timestamp/processing-order properties were confirmed for this run, but no
+  latency claim is made.** There were zero source-timestamp regressions, zero
+  local ingest-sequence regressions, zero local monotonic-receive regressions,
+  16 same-timestamp groups, and zero future-source observations. The retained
+  `received_at - source_timestamp` distribution is probe-observed
+  source-to-processing delay contaminated by local clock offset, event-loop
+  scheduling, socket/library buffering, backpressure, and synchronous flush/fsync
+  durable-persistence overhead; it is not a venue/network latency estimate.
+- **Current first-party documentation differs from the review premise.** The
+  current Market WebSocket schema documents optional `initial_dump` and `level`
+  fields and their defaults. The corrective run nevertheless omitted those
+  optional controls as a project-derived experimental choice and recorded the
+  exact payload; omission is not evidence that the fields are unsupported.
+
+The detailed status comparison, manifests, counterexamples, and evidence lineage
+remain in `docs/experiments/market-feed-contract-probe.md`. Q1, Q4, Q5, and Q7
+remain unresolved; Q2, Q3, Q6, and Q8 are confirmed only within the final
+corrective run's stated applicability limits. No ADR or production replay
+contract changes are accepted by this subsection.
+
 These questions are the purpose of `IP-001-market-feed-contract-probe.md`.
 
 ---
