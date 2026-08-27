@@ -12,6 +12,7 @@ This file is the authoritative map of project documentation. Research should lea
 - [`data/`](data/) owns source-of-truth policy, raw-data contracts, replay semantics, provenance, and data-quality rules.
   - [Data documentation map](data/README.md)
   - [Market data and replay protocol](data/market-data-and-replay.md)
+  - [pmxt historical ordering risk](data/pmxt-historical-ordering-risk.md) — pre-audit evidence and unresolved ordering/availability questions for historical pmxt replay.
 - [`design/`](design/) owns system architecture and engineering decisions.
   - [Architecture](design/architecture.md)
   - [Execution model](design/execution-model.md)
@@ -21,8 +22,10 @@ This file is the authoritative map of project documentation. Research should lea
   - [Packet format and workflow](implementation-packets/README.md)
   - [IP-000: Repository bootstrap](implementation-packets/IP-000-repository-bootstrap.md)
   - [IP-001: Market feed contract probe](implementation-packets/IP-001-market-feed-contract-probe.md)
+  - [IP-002: pmxt historical ordering ambiguity audit](implementation-packets/IP-002-pmxt-ordering-ambiguity-audit.md)
 - [`experiments/`](experiments/) owns experimental methodology, runs, and results.
   - [Experiment log](experiments/experiment-log.md)
+  - [Market feed contract probe](experiments/market-feed-contract-probe.md)
 
 ## Extensibility
 
