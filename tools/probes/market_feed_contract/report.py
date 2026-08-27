@@ -848,7 +848,9 @@ QUESTION_METHOD_DELTAS = (
     "`assets_ids` and `type`, relying on currently documented defaults.",
     "The corrective analyzer separates locally empty-side numeric 0/1 candidates from "
     "genuine mismatches, requires targeted aligned REST confirmation, and prevents "
-    "superseded updates from receiving duplicate validation credit.",
+    "superseded updates from receiving duplicate validation credit. Run-level Q3 "
+    "confirmation requires every observed empty-side candidate instance to be confirmed; "
+    "kind-level support remains diagnostic only.",
     "The corrective analyzer distinguishes multiple entries for different assets from "
     "same-asset ordering ambiguity.",
     "The same official hash algorithm and no-fabricated-input rule apply to both runs.",
@@ -1125,8 +1127,11 @@ def render_comparative_report(
             "full `book` snapshots and `price_change` level updates, and explicitly "
             "describes zero-size changes as level removals and non-zero `size` as the new "
             "aggregate size.",
-            "- The current first-party schema documents `initial_dump` and `level` as "
-            "optional subscription fields with defaults. Current official TypeScript "
+            "- The current first-party raw AsyncAPI source at "
+            "https://docs.polymarket.com/api-reference/wss/market.md declares "
+            "`initial_dump` and `level` in the initial Subscription Request's "
+            "`jsonPayloadSchema.properties`, with schema defaults `true` and `2`. Current "
+            "official TypeScript "
             "bindings separately document an empty string as the raw absent-value form "
             "for optional best bid/ask decimals.",
             "- Each run's identity, software provenance, raw-evidence path, record counts, "
@@ -1146,21 +1151,28 @@ def render_comparative_report(
             "",
             "- Stable-window REST alignment, discriminating-update eligibility, exclusion "
             "rules, and the historical/corrective comparison are project-defined methods.",
+            "- Run-level empty-side confirmation requires every observed candidate instance "
+            "to have aligned REST confirmation. Confirmation of at least one candidate per "
+            "observed kind is retained only as a diagnostic and cannot independently close "
+            "Q3.",
             "- Any interpretation of observed `best_ask=1` or `best_bid=0` as an empty side "
             "is limited to directly aligned candidates in the named run. This report does "
             "not claim that numeric 0/1 values are universal empty-side protocol sentinels.",
             "",
             "## Current documentation discrepancy and subscription control",
             "",
-            "The current first-party Market WebSocket documentation describes `initial_dump` "
-            "and `level` as optional subscription fields with documented defaults. The "
-            "historical run sent both fields explicitly; the corrective configuration records "
-            "whether it omitted them and relied on those defaults. This differs from the "
-            "historical report's premise that these controls were undocumented. It is a "
-            "documentation-version discrepancy and experimental control, not evidence that "
-            "the same omission semantics applied universally or at every historical point.",
+            "The current first-party raw AsyncAPI source at "
+            "https://docs.polymarket.com/api-reference/wss/market.md declares optional "
+            "`initial_dump` and `level` properties in the initial Subscription Request's "
+            "`jsonPayloadSchema.properties`, with defaults `true` and `2`. Its canonical "
+            "Subscription Request example contains only `assets_ids` and `type`. The "
+            "historical run sent both optional fields explicitly; the corrective configuration "
+            "records that it omitted them and used the canonical minimal payload. This differs "
+            "from the historical report's premise that these controls were undocumented. It "
+            "is a documentation-version discrepancy and experimental control, not evidence "
+            "that the same omission semantics applied universally or at every historical point.",
             "",
-            "Current reference: https://docs.polymarket.com/api-reference/wss/market",
+            "Current rendered reference: https://docs.polymarket.com/api-reference/wss/market",
             "",
             "## Q8 measurement boundary",
             "",

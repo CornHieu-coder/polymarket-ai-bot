@@ -508,10 +508,13 @@ two reused token IDs returned REST 404 and produced no WebSocket books.
   scheduling, socket/library buffering, backpressure, and synchronous flush/fsync
   durable-persistence overhead; it is not a venue/network latency estimate.
 - **Current first-party documentation differs from the review premise.** The
-  current Market WebSocket schema documents optional `initial_dump` and `level`
-  fields and their defaults. The corrective run nevertheless omitted those
-  optional controls as a project-derived experimental choice and recorded the
-  exact payload; omission is not evidence that the fields are unsupported.
+  current first-party raw AsyncAPI source at
+  https://docs.polymarket.com/api-reference/wss/market.md declares optional
+  `initial_dump` and `level` properties in the initial Subscription Request's
+  `jsonPayloadSchema.properties`, with defaults `true` and `2`. Its canonical
+  example contains only `assets_ids` and `type`. The corrective run used that
+  minimal payload as a project-derived experimental choice and recorded it
+  exactly; omission is not evidence that the optional fields are unsupported.
 
 The detailed status comparison, manifests, counterexamples, and evidence lineage
 remain in `docs/experiments/market-feed-contract-probe.md`. Q1, Q4, Q5, and Q7

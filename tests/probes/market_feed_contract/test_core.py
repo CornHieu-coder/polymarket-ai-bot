@@ -328,6 +328,55 @@ class AnalyzerTests(unittest.TestCase):
         self.assertEqual(interpretation["unresolved_candidates"], 0)
         self.assertIn("never normalized globally", interpretation["scope"])
 
+    def test_same_kind_unresolved_candidate_blocks_run_level_q3_confirmation(self) -> None:
+        first_context = self.observe_empty_ask_boundary_candidate()
+        first_rest = deepcopy(self.book)
+        first_rest.pop("event_type")
+        first_rest["asks"] = []
+        self.analyzer.observe_rest(
+            self.aligned_rest_record(sequence=3, context=first_context), first_rest
+        )
+
+        replacement = deepcopy(self.change)
+        replacement["timestamp"] = str(int(replacement["timestamp"]) + 1)
+        replacement["price_changes"][0].update(
+            {
+                "price": "0.40",
+                "size": "8",
+                "side": "BUY",
+                "best_bid": "0.40",
+                "best_ask": "1",
+            }
+        )
+        self.analyzer.observe_websocket(record(4, replacement), replacement)
+        second_context = self.analyzer.take_empty_side_probe_requests()[0]
+        self.assertEqual(
+            second_context["candidate_kind"], first_context["candidate_kind"]
+        )
+
+        second_rest = deepcopy(first_rest)
+        second_rest["bids"][0]["size"] = "8"
+        self.analyzer.observe_rest(
+            self.aligned_rest_record(sequence=5), second_rest
+        )
+
+        q3 = self.analyzer.summary({}, {})["q3"]
+        interpretation = q3["empty_side_boundary_interpretation"]
+        self.assertEqual(
+            q3["component_statuses"]["nonzero_aggregate_replacement"], "CONFIRMED"
+        )
+        self.assertEqual(q3["component_statuses"]["zero_size_delete"], "CONFIRMED")
+        self.assertEqual(q3["component_statuses"]["buy_bid_sell_ask"], "CONFIRMED")
+        self.assertEqual(interpretation["observed_kinds"], {"ask_one_when_empty": 2})
+        self.assertEqual(interpretation["confirmed_kinds"], {"ask_one_when_empty": 1})
+        self.assertEqual(interpretation["kind_level_status"], "CONFIRMED")
+        self.assertEqual(interpretation["confirmed_candidates"], 1)
+        self.assertEqual(interpretation["unresolved_candidates"], 1)
+        self.assertFalse(interpretation["all_observed_candidates_confirmed"])
+        self.assertEqual(interpretation["status"], "UNRESOLVED")
+        self.assertEqual(q3["component_statuses"]["event_best_prices"], "UNRESOLVED")
+        self.assertEqual(q3["status"], "UNRESOLVED")
+
     def test_rest_mismatch_leaves_empty_side_candidate_unresolved(self) -> None:
         context = self.observe_empty_ask_boundary_candidate()
         rest = deepcopy(self.book)

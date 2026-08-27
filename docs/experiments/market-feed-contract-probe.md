@@ -104,7 +104,7 @@ Counterexamples and exclusions are reproduced in the later significant-evidence 
 
 - Historical/original: **UNRESOLVED** — observed/applied/excluded changes=432/232/200; BBO exact/genuine mismatch=228/4; validated non-zero/zero=192/0; empty-side candidates confirmed/observed=0/0; superseded before validation=0.
 - Corrective: **CONFIRMED** — observed/applied/excluded changes=138/138/0; BBO exact/genuine mismatch=130/0; validated non-zero/zero=89/3; empty-side candidates confirmed/observed=8/8; superseded before validation=36.
-- Difference/method: The corrective analyzer separates locally empty-side numeric 0/1 candidates from genuine mismatches, requires targeted aligned REST confirmation, and prevents superseded updates from receiving duplicate validation credit.
+- Difference/method: The corrective analyzer separates locally empty-side numeric 0/1 candidates from genuine mismatches, requires targeted aligned REST confirmation, and prevents superseded updates from receiving duplicate validation credit. Run-level Q3 confirmation requires every observed empty-side candidate instance to be confirmed; kind-level support remains diagnostic only.
 - Applicability limit: Only applied, non-superseded, eligible updates and explicitly aligned REST evidence support the label; candidate numeric boundaries are not universal protocol rules.
 
 ### Q4 — Multiple updates per frame
@@ -148,7 +148,7 @@ Counterexamples and exclusions are reproduced in the later significant-evidence 
 ### Established
 
 - First-party material establishes that the public Market WebSocket carries full `book` snapshots and `price_change` level updates, and explicitly describes zero-size changes as level removals and non-zero `size` as the new aggregate size.
-- The current first-party schema documents `initial_dump` and `level` as optional subscription fields with defaults. Current official TypeScript bindings separately document an empty string as the raw absent-value form for optional best bid/ask decimals.
+- The current first-party raw AsyncAPI source at https://docs.polymarket.com/api-reference/wss/market.md declares `initial_dump` and `level` in the initial Subscription Request's `jsonPayloadSchema.properties`, with schema defaults `true` and `2`. Current official TypeScript bindings separately document an empty string as the raw absent-value form for optional best bid/ask decimals.
 - Each run's identity, software provenance, raw-evidence path, record counts, and manifest digests establish what these named artifacts contain; they do not establish universal venue behavior.
 
 ### Suggested
@@ -159,13 +159,14 @@ Counterexamples and exclusions are reproduced in the later significant-evidence 
 ### Project-derived
 
 - Stable-window REST alignment, discriminating-update eligibility, exclusion rules, and the historical/corrective comparison are project-defined methods.
+- Run-level empty-side confirmation requires every observed candidate instance to have aligned REST confirmation. Confirmation of at least one candidate per observed kind is retained only as a diagnostic and cannot independently close Q3.
 - Any interpretation of observed `best_ask=1` or `best_bid=0` as an empty side is limited to directly aligned candidates in the named run. This report does not claim that numeric 0/1 values are universal empty-side protocol sentinels.
 
 ## Current documentation discrepancy and subscription control
 
-The current first-party Market WebSocket documentation describes `initial_dump` and `level` as optional subscription fields with documented defaults. The historical run sent both fields explicitly; the corrective configuration records whether it omitted them and relied on those defaults. This differs from the historical report's premise that these controls were undocumented. It is a documentation-version discrepancy and experimental control, not evidence that the same omission semantics applied universally or at every historical point.
+The current first-party raw AsyncAPI source at https://docs.polymarket.com/api-reference/wss/market.md declares optional `initial_dump` and `level` properties in the initial Subscription Request's `jsonPayloadSchema.properties`, with defaults `true` and `2`. Its canonical Subscription Request example contains only `assets_ids` and `type`. The historical run sent both optional fields explicitly; the corrective configuration records that it omitted them and used the canonical minimal payload. This differs from the historical report's premise that these controls were undocumented. It is a documentation-version discrepancy and experimental control, not evidence that the same omission semantics applied universally or at every historical point.
 
-Current reference: https://docs.polymarket.com/api-reference/wss/market
+Current rendered reference: https://docs.polymarket.com/api-reference/wss/market
 
 ## Q8 measurement boundary
 

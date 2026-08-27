@@ -134,7 +134,9 @@ def comparative_summaries() -> tuple[dict, dict]:
             "genuine_mismatches": 0,
             "superseded_before_validation": 3,
             "empty_side_boundary_interpretation": {
-                "status": "CONFIRMED",
+                "status": "UNRESOLVED",
+                "kind_level_status": "CONFIRMED",
+                "all_observed_candidates_confirmed": False,
                 "scope": "Confirmed only for aligned candidates in this run.",
                 "observed_candidates": 2,
                 "observed_kinds": {
@@ -221,6 +223,11 @@ class ReportTests(unittest.TestCase):
         self.assertIn("empty string as the raw absent-value form", report)
         self.assertIn("initial_dump", report)
         self.assertIn("level", report)
+        self.assertIn(
+            "https://docs.polymarket.com/api-reference/wss/market.md", report
+        )
+        self.assertIn("`jsonPayloadSchema.properties`", report)
+        self.assertIn("kind-level support remains diagnostic only", report)
         self.assertIn("not claim that numeric 0/1 values are universal", report)
         self.assertIn("Per-question evidence, differences, and applicability", report)
         for index in range(1, 9):

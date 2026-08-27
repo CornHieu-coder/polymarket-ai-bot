@@ -1853,15 +1853,21 @@ class ContractAnalyzer:
             for kind in observed_candidate_kinds
             if self.empty_side_rest_confirmations[kind] > 0
         )
-        empty_side_interpretation_supported = bool(observed_candidate_kinds) and (
+        empty_side_kind_support = bool(observed_candidate_kinds) and (
             confirmed_candidate_kinds == observed_candidate_kinds
         )
-        empty_side_interpretation_status = (
-            "CONFIRMED" if empty_side_interpretation_supported else "UNRESOLVED"
+        empty_side_kind_support_status = (
+            "CONFIRMED" if empty_side_kind_support else "UNRESOLVED"
         )
         unresolved_candidate_count = sum(
             candidate["rest_validation"] != "CONFIRMED"
             for candidate in self.empty_side_candidates
+        )
+        empty_side_interpretation_supported = (
+            empty_side_kind_support and unresolved_candidate_count == 0
+        )
+        empty_side_interpretation_status = (
+            "CONFIRMED" if empty_side_interpretation_supported else "UNRESOLVED"
         )
         empty_side_requirement_met = (
             not self.empty_side_candidates or empty_side_interpretation_supported
@@ -1991,6 +1997,11 @@ class ContractAnalyzer:
                 "idempotent_replacements": self.idempotent_replacements,
                 "empty_side_boundary_interpretation": {
                     "status": empty_side_interpretation_status,
+                    "kind_level_status": empty_side_kind_support_status,
+                    "all_observed_candidates_confirmed": (
+                        bool(self.empty_side_candidates)
+                        and unresolved_candidate_count == 0
+                    ),
                     "scope": (
                         "Probe-only, observation-bounded candidate interpretation. "
                         "Numeric 1/0 is never normalized globally and first-party "
@@ -2018,8 +2029,11 @@ class ContractAnalyzer:
                         "A candidate kind is supported only after at least one public "
                         "REST /book response exactly matches full reconstructed depth "
                         "across an unchanged session/state-version request window and "
-                        "the relevant REST side is empty. Every other REST outcome "
-                        "remains diagnostic and UNRESOLVED."
+                        "the relevant REST side is empty. Kind-level support is diagnostic "
+                        "only; the bounded run-level interpretation, event-best-price "
+                        "component, and Q3 cannot be CONFIRMED while any observed "
+                        "candidate remains unresolved. Every other REST outcome remains "
+                        "diagnostic and UNRESOLVED."
                     ),
                     "candidates": self.empty_side_candidates,
                 },
