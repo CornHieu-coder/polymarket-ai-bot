@@ -1,0 +1,19 @@
+{
+  "event_type": "book",
+  "asset_id": "12345678901234567890",
+  "market": "0xfixture-condition",
+  "bids": [
+    {"price": "0.40", "size": "10.00"},
+    {"price": "0.30", "size": "20.00"}
+  ],
+  "asks": [
+    {"price": "0.60", "size": "12.00"},
+    {"price": "0.70", "size": "22.00"}
+  ],
+  "timestamp": "1787702400000",
+  "hash": "fixture-not-live",
+  "min_order_size": "1",
+  "tick_size": "0.01",
+  "neg_risk": false,
+  "last_trade_price": "0.50"
+}
