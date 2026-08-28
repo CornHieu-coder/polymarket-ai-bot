@@ -22,12 +22,18 @@ from .engine import (
 from .report import render_report, write_report
 from .core import sha256_file
 from .recovery import (
+    _atomic_create_json,
     analyze_shard,
     partition_sample,
     run_pilot,
     select_august_sample,
 )
 from .recovery_run import complete_recovery, finalize_recovery
+from .streaming import (
+    analyze_stream,
+    compare_preserved_checkpoint,
+    run_streaming_pilot,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -116,6 +122,43 @@ def _parser() -> argparse.ArgumentParser:
     )
     recovery_finalize.add_argument("--feasibility-rationale", required=True)
     recovery_finalize.add_argument("--final-test-result", required=True)
+    streaming_worker = subparsers.add_parser("streaming-window-worker")
+    streaming_worker.add_argument("--path", type=Path, required=True)
+    streaming_worker.add_argument("--actual-hour", required=True)
+    streaming_worker.add_argument("--mode", choices=("W1", "W2"), required=True)
+    streaming_worker.add_argument("--output", type=Path, required=True)
+    streaming_compare = subparsers.add_parser("streaming-compare-checkpoint")
+    streaming_compare.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
+    streaming_compare.add_argument(
+        "--recovery-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002r-recovery",
+    )
+    streaming_compare.add_argument("--output", type=Path, required=True)
+    streaming_pilot = subparsers.add_parser("streaming-pilot")
+    streaming_pilot.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
+    streaming_pilot.add_argument(
+        "--recovery-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002r-recovery",
+    )
+    streaming_pilot.add_argument(
+        "--pilot-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002s-streaming-pilot",
+    )
+    streaming_pilot.add_argument("--repository", type=Path, default=REPO_ROOT)
+    streaming_pilot.add_argument("--offline-test-result", required=True)
+    streaming_pilot.add_argument(
+        "--exact-equivalence-passed",
+        action="store_true",
+        help="Record that the complete offline exact-equivalence suite passed.",
+    )
+    streaming_pilot.add_argument(
+        "--real-shard-comparison",
+        type=Path,
+        required=True,
+    )
     return parser
 
 
@@ -313,6 +356,37 @@ def main() -> int:
             feasibility_label=arguments.feasibility_label,
             feasibility_rationale=arguments.feasibility_rationale,
             final_test_result=arguments.final_test_result,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "streaming-window-worker":
+        result = analyze_stream(
+            arguments.path,
+            actual_hour=arguments.actual_hour,
+            mode=arguments.mode,
+        )
+        _atomic_create_json(arguments.output, result)
+        return 0
+    if arguments.command == "streaming-compare-checkpoint":
+        result = compare_preserved_checkpoint(
+            original_output=arguments.original_output,
+            recovery_root=arguments.recovery_root,
+        )
+        _atomic_create_json(arguments.output, result)
+        print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "streaming-pilot":
+        comparison = json.loads(
+            arguments.real_shard_comparison.read_text(encoding="utf-8")
+        )
+        result = run_streaming_pilot(
+            original_output=arguments.original_output,
+            recovery_root=arguments.recovery_root,
+            pilot_root=arguments.pilot_root,
+            repository=arguments.repository,
+            offline_test_result=arguments.offline_test_result,
+            exact_equivalence_passed=arguments.exact_equivalence_passed,
+            real_shard_comparison=comparison,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
         return 0
