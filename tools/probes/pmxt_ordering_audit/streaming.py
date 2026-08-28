@@ -12,7 +12,7 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 import duckdb
 import pyarrow
@@ -73,6 +73,13 @@ EXPECTED_COLUMNS = (
 
 class SortContractError(ValueError):
     """Raised when tested physical rows violate the documented composite sort."""
+
+
+class StreamingDeadlineExceeded(RuntimeError):
+    """Raised before another batch is processed after an authorized deadline."""
+
+
+_FULL_AUGUST_STREAM_CAPABILITY = object()
 
 
 def _utc_now() -> str:
@@ -820,7 +827,32 @@ def _row_group_for(starts: Sequence[int], row_index: int) -> int:
     raise ValueError(f"physical row index outside file: {row_index}")
 
 
-def analyze_stream(
+def _enforce_scan_boundary(
+    *,
+    mode: str,
+    total_rows: int,
+    reference_scan: bool,
+    capability: object | None,
+) -> None:
+    if mode != "all":
+        return
+    if capability is _FULL_AUGUST_STREAM_CAPABILITY:
+        if reference_scan:
+            raise RuntimeError(
+                "authorized full-August streaming is separate from reference scans"
+            )
+        return
+    if not reference_scan:
+        raise RuntimeError(
+            "whole-file streaming is reference-only and requires explicit authorization"
+        )
+    if total_rows > REFERENCE_SCAN_MAX_ROWS:
+        raise RuntimeError(
+            "reference scan exceeds the bounded 10,000,000-row safety limit"
+        )
+
+
+def _analyze_stream(
     path: Path,
     *,
     actual_hour: str,
@@ -828,6 +860,9 @@ def analyze_stream(
     batch_size: int = ARROW_BATCH_SIZE,
     source_schema_path: Path | None = None,
     reference_scan: bool = False,
+    capability: object | None = None,
+    deadline_monotonic: float | None = None,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Analyze a whole sorted file or one mechanical complete-asset pilot window."""
 
@@ -841,14 +876,12 @@ def analyze_stream(
         raise ValueError(f"Arrow schema mismatch; missing={missing}, unexpected={unexpected}")
     starts = _row_group_starts(parquet)
     total_rows = starts[-1]
-    if mode == "all" and not reference_scan:
-        raise RuntimeError(
-            "whole-file streaming is reference-only and requires explicit authorization"
-        )
-    if mode == "all" and total_rows > REFERENCE_SCAN_MAX_ROWS:
-        raise RuntimeError(
-            "reference scan exceeds the bounded 10,000,000-row safety limit"
-        )
+    _enforce_scan_boundary(
+        mode=mode,
+        total_rows=total_rows,
+        reference_scan=reference_scan,
+        capability=capability,
+    )
     midpoint = total_rows // 2
     first_group = 0 if mode != "W2" else _row_group_for(starts, midpoint)
     columns = list(EXPECTED_COLUMNS)
@@ -884,6 +917,10 @@ def analyze_stream(
         columns=columns,
         use_threads=False,
     ):
+        if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+            raise StreamingDeadlineExceeded(
+                "authorized eight-hour streaming wall-clock budget expired"
+            )
         batches_read += 1
         batch_had_rows = False
         rows = batch.to_pylist()
@@ -933,8 +970,24 @@ def analyze_stream(
             batch_had_rows = True
         if batch_had_rows:
             analyzed_batches += 1
+        if progress_callback is not None:
+            progress_callback(
+                {
+                    "batches_read": batches_read,
+                    "batches_with_analyzed_rows": analyzed_batches,
+                    "physical_rows_read": physical_index,
+                    "rows_analyzed": rows_analyzed,
+                    "parquet_total_rows": total_rows,
+                    "maximum_buffered_logical_group_size": analyzer.max_group_size,
+                    "maximum_asset_rows_observed": analyzer.max_asset_rows,
+                }
+            )
         if stop:
             break
+    if deadline_monotonic is not None and time.monotonic() >= deadline_monotonic:
+        raise StreamingDeadlineExceeded(
+            "authorized eight-hour streaming wall-clock budget expired"
+        )
     if mode in {"W1", "W2"} and rows_analyzed < WINDOW_MIN_ROWS:
         raise RuntimeError(f"{mode} could not obtain 2,000,000 complete-asset rows")
     if window_start is None:
@@ -968,6 +1021,49 @@ def analyze_stream(
             "discarded_midpoint_asset": normalize_json(discarded_midpoint_asset),
         },
     }
+
+
+def analyze_stream(
+    path: Path,
+    *,
+    actual_hour: str,
+    mode: str = "all",
+    batch_size: int = ARROW_BATCH_SIZE,
+    source_schema_path: Path | None = None,
+    reference_scan: bool = False,
+) -> dict[str, Any]:
+    """Analyze a pilot window or a bounded reference-only whole file."""
+
+    return _analyze_stream(
+        path,
+        actual_hour=actual_hour,
+        mode=mode,
+        batch_size=batch_size,
+        source_schema_path=source_schema_path,
+        reference_scan=reference_scan,
+    )
+
+
+def _analyze_authorized_full_august(
+    path: Path,
+    *,
+    actual_hour: str,
+    batch_size: int = ARROW_BATCH_SIZE,
+    deadline_monotonic: float,
+    progress_callback: Callable[[Mapping[str, Any]], None] | None = None,
+) -> dict[str, Any]:
+    """Private capability route used only by the full-August authorization worker."""
+
+    return _analyze_stream(
+        path,
+        actual_hour=actual_hour,
+        mode="all",
+        batch_size=batch_size,
+        reference_scan=False,
+        capability=_FULL_AUGUST_STREAM_CAPABILITY,
+        deadline_monotonic=deadline_monotonic,
+        progress_callback=progress_callback,
+    )
 
 
 def scientific_a1_a8(result: Mapping[str, Any]) -> dict[str, Any]:

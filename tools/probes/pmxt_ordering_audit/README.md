@@ -64,3 +64,26 @@ python -m tools.probes.pmxt_ordering_audit finalize \
 
 The command writes ignored `summary.json` evidence and deterministically updates
 `docs/experiments/pmxt-ordering-ambiguity-audit.md`.
+
+## Later owner-authorized full-August boundary
+
+The original IP-002S result remains `STREAMING_NOT_FEASIBLE` under its
+30-minute gate. A later owner decision permits one unattended run with an
+eight-hour wall-clock budget; that operational authorization does not
+reinterpret the IP-002S gate or change the frozen A1-A8 algorithm.
+
+The guarded launcher accepts no input or output path. It verifies the exact
+preserved August SHA-256, clean committed Git provenance, and the expected head
+before consuming an immutable one-time authorization and starting the detached
+worker:
+
+```text
+python -m tools.probes.pmxt_ordering_audit streaming-full-august-launch \
+  --expected-git-sha <exact-40-character-commit> \
+  --owner-approval OWNER_APPROVED_IP002S_FULL_AUGUST_8_HOURS
+```
+
+Progress, PID metadata, logs, failure evidence, and the atomic A1-A8 result stay
+under gitignored `outputs/pmxt-ordering-audit/ip-002s-full-august/`. Any prior
+artifact blocks a restart. This command does not invoke A9, report finalization,
+or production replay work.

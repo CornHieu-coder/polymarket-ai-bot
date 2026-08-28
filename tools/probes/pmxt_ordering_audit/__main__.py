@@ -36,6 +36,11 @@ from .streaming import (
     compare_preserved_checkpoint,
     run_streaming_pilot,
 )
+from .long_run import (
+    OWNER_APPROVAL_PHRASE,
+    launch_full_august,
+    run_full_august_worker,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -171,6 +176,23 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         required=True,
     )
+    full_august = subparsers.add_parser(
+        "streaming-full-august-launch",
+        help="one-time detached full-August A1-A8 launch (owner approval required)",
+    )
+    full_august.add_argument("--expected-git-sha", required=True)
+    full_august.add_argument(
+        "--owner-approval",
+        required=True,
+        choices=(OWNER_APPROVAL_PHRASE,),
+        help="exact owner-approved eight-hour authorization phrase",
+    )
+    full_august_worker = subparsers.add_parser(
+        "streaming-full-august-worker",
+        help=argparse.SUPPRESS,
+    )
+    full_august_worker.add_argument("--authorization", type=Path, required=True)
+    full_august_worker.add_argument("--run-id", required=True)
     return parser
 
 
@@ -409,6 +431,19 @@ def main() -> int:
             real_shard_comparison=comparison,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "streaming-full-august-launch":
+        result = launch_full_august(
+            expected_git_sha=arguments.expected_git_sha,
+            owner_approval=arguments.owner_approval,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "streaming-full-august-worker":
+        run_full_august_worker(
+            authorization_path=arguments.authorization,
+            run_id=arguments.run_id,
+        )
         return 0
     return _finalize(arguments)
 
