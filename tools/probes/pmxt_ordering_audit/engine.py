@@ -235,12 +235,30 @@ def _load_book_groups(
 
 
 def _create_analysis_tables(
-    connection: duckdb.DuckDBPyConnection, path: Path
+    connection: duckdb.DuckDBPyConnection,
+    path: Path,
+    *,
+    source_row_ordinal_column: str | None = None,
 ) -> None:
+    if source_row_ordinal_column is None:
+        event_source = (
+            f"read_parquet('{_sql_path(path)}', file_row_number=true)"
+        )
+        event_projection = "*"
+    else:
+        if source_row_ordinal_column != "_ip002r_source_row_ordinal":
+            raise ValueError("unsupported recovery source-row ordinal column")
+        event_source = (
+            f"read_parquet('{_sql_path(path)}', hive_partitioning=false)"
+        )
+        event_projection = (
+            f"* EXCLUDE ({source_row_ordinal_column}), "
+            f"{source_row_ordinal_column} AS file_row_number"
+        )
     connection.execute(
         f"""
         CREATE VIEW events AS
-        SELECT * FROM read_parquet('{_sql_path(path)}', file_row_number=true)
+        SELECT {event_projection} FROM {event_source}
         """
     )
     connection.execute(
@@ -1144,10 +1162,19 @@ def analyze_file(
     sample: Mapping[str, Any],
     *,
     working_directory: Path,
+    source_schema_path: Path | None = None,
+    source_row_ordinal_column: str | None = None,
+    duckdb_memory_limit: str | None = None,
+    duckdb_threads: int | None = None,
 ) -> dict[str, Any]:
     """Analyze one valid downloaded sample and return deterministic A1-A8 evidence."""
 
     path = Path(str(sample["local_path"])).resolve()
+    schema_path = (
+        Path(source_schema_path).resolve()
+        if source_schema_path is not None
+        else path
+    )
     start, end = _hour_bounds(str(sample["actual_hour"]))
     file_hash = sha256_file(path)
     if file_hash != sample["sha256"]:
@@ -1159,7 +1186,7 @@ def analyze_file(
         ).fetchone()
         if file_meta is None:
             raise ValueError("missing Parquet file metadata")
-        schema = _schema(connection, path)
+        schema = _schema(connection, schema_path)
     finally:
         connection.close()
     missing_required = [
@@ -1175,11 +1202,30 @@ def analyze_file(
     temp_directory.mkdir(parents=True, exist_ok=True)
     connection = duckdb.connect()
     try:
+        if duckdb_memory_limit is not None:
+            if duckdb_memory_limit != "8GiB":
+                raise ValueError("IP-002R recovery memory limit must be exactly 8GiB")
+            connection.execute("SET memory_limit = '8GiB'")
+        if duckdb_threads is not None:
+            if duckdb_threads not in {1, 2}:
+                raise ValueError("IP-002R recovery threads must be one or two")
+            connection.execute(f"SET threads = {duckdb_threads}")
         connection.execute("SET preserve_insertion_order = false")
         connection.execute(
             f"SET temp_directory = '{_sql_path(temp_directory)}'"
         )
-        _create_analysis_tables(connection, path)
+        configured_settings = connection.execute(
+            """
+            SELECT current_setting('memory_limit'), current_setting('threads'),
+                   current_setting('temp_directory')
+            """
+        ).fetchone()
+        assert configured_settings is not None
+        _create_analysis_tables(
+            connection,
+            path,
+            source_row_ordinal_column=source_row_ordinal_column,
+        )
         a1 = _a1(connection, schema=schema, start=start, end=end)
         a2 = _a2(connection)
         a3 = _a3(connection)
@@ -1205,6 +1251,14 @@ def analyze_file(
                 "row_count": int(file_meta[0]),
                 "row_group_count": int(file_meta[1]),
                 "download_attempts": sample["attempts"],
+                "schema_source_path": str(schema_path),
+                "source_row_ordinal_column": source_row_ordinal_column,
+                "duckdb_configuration": {
+                    "memory_limit": str(configured_settings[0]),
+                    "threads": int(configured_settings[1]),
+                    "temp_directory": str(configured_settings[2]),
+                    "preserve_insertion_order": False,
+                },
             },
             "a1": a1,
             "a2": a2,

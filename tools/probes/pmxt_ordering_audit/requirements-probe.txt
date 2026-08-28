@@ -1,2 +1,3 @@
 # Research-only dependency for IP-002. This does not establish the production stack.
 duckdb==1.4.0
+psutil==7.2.2

@@ -21,6 +21,12 @@ from .engine import (
 )
 from .report import render_report, write_report
 from .core import sha256_file
+from .recovery import (
+    analyze_shard,
+    partition_sample,
+    run_pilot,
+    select_august_sample,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -60,6 +66,26 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     finalize.add_argument("--feasibility-rationale", required=True)
+    partition_worker = subparsers.add_parser("recovery-partition-worker")
+    partition_worker.add_argument("--original-output", type=Path, required=True)
+    partition_worker.add_argument("--recovery-root", type=Path, required=True)
+    partition_worker.add_argument("--shard-count", type=int, choices=(32, 64), required=True)
+    shard_worker = subparsers.add_parser("recovery-shard-worker")
+    shard_worker.add_argument("--original-output", type=Path, required=True)
+    shard_worker.add_argument("--partition-manifest", type=Path, required=True)
+    shard_worker.add_argument("--shard-id", type=int, required=True)
+    shard_worker.add_argument("--checkpoint-directory", type=Path, required=True)
+    shard_worker.add_argument("--repository", type=Path, required=True)
+    pilot = subparsers.add_parser("recovery-pilot")
+    pilot.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
+    pilot.add_argument(
+        "--recovery-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002r-recovery",
+    )
+    pilot.add_argument("--repository", type=Path, default=REPO_ROOT)
+    pilot.add_argument("--shard-count", type=int, choices=(32, 64), default=32)
+    pilot.add_argument("--offline-test-result", required=True)
     return parser
 
 
@@ -204,6 +230,30 @@ def main() -> int:
         return 0
     if arguments.command == "analyze":
         return _analyze(arguments)
+    if arguments.command == "recovery-partition-worker":
+        sample = select_august_sample(arguments.original_output)
+        partition_sample(sample, arguments.recovery_root, arguments.shard_count)
+        return 0
+    if arguments.command == "recovery-shard-worker":
+        sample = select_august_sample(arguments.original_output)
+        analyze_shard(
+            sample,
+            arguments.partition_manifest,
+            arguments.shard_id,
+            arguments.checkpoint_directory,
+            arguments.repository,
+        )
+        return 0
+    if arguments.command == "recovery-pilot":
+        result = run_pilot(
+            arguments.original_output,
+            arguments.recovery_root,
+            arguments.repository,
+            arguments.offline_test_result,
+            arguments.shard_count,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
     return _finalize(arguments)
 
 
