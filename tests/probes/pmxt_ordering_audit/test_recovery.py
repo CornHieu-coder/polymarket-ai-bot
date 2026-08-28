@@ -10,6 +10,7 @@ import duckdb
 from tests.probes.pmxt_ordering_audit.test_engine_report import sample_for, write_fixture
 from tools.probes.pmxt_ordering_audit.core import sha256_file
 from tools.probes.pmxt_ordering_audit.engine import analyze_file
+from tools.probes.pmxt_ordering_audit.engine import pool_results
 from tools.probes.pmxt_ordering_audit.recovery import (
     SHARD_ALGORITHM,
     SOURCE_ROW_ORDINAL,
@@ -23,6 +24,11 @@ from tools.probes.pmxt_ordering_audit.recovery import (
     verify_partition,
     write_checkpoint,
 )
+from tools.probes.pmxt_ordering_audit.recovery_run import (
+    _validation_fixture,
+    _validation_sample,
+)
+from tools.probes.pmxt_ordering_audit.report import render_report
 
 
 class RecoveryTests(unittest.TestCase):
@@ -247,6 +253,101 @@ class RecoveryTests(unittest.TestCase):
         ):
             arguments = {**passing, key: bad}
             self.assertEqual(resource_gate(**arguments)["status"], "FAIL", key)
+
+    def test_june_validation_unit_matches_reference_and_recovery_engines(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            raw = root / "june.parquet"
+            write_fixture(raw)
+            sample = sample_for(raw)
+            recovery_path, reference_path, manifest = _validation_fixture(
+                sample, root / "recovery"
+            )
+            reference = analyze_file(
+                _validation_sample(sample, reference_path, "REFERENCE"),
+                working_directory=root / "reference-work",
+                source_schema_path=raw,
+            )
+            recovered = analyze_file(
+                _validation_sample(sample, recovery_path, "RECOVERY"),
+                working_directory=root / "recovery-work",
+                source_schema_path=raw,
+                source_row_ordinal_column=SOURCE_ROW_ORDINAL,
+                duckdb_memory_limit="8GiB",
+                duckdb_threads=2,
+            )
+        self.assertGreater(manifest["row_count"], 0)
+        for question in [f"a{index}" for index in range(1, 9)]:
+            self.assertEqual(reference[question], recovered[question], question)
+
+    def test_recovery_report_preserves_execution_stages_and_puts_a9_last(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            sample = self._analyze_partition(Path(temporary))[0]
+        pooled = pool_results(
+            [sample],
+            feasibility_label="UNRESOLVED",
+            feasibility_rationale="Synthetic data cannot resolve A9.",
+        )
+        summary = {
+            "status": "COMPLETE",
+            "run": {
+                "started_at": "2026-08-01T00:00:00Z",
+                "ended_at": "2026-08-01T00:01:00Z",
+                "runtime": {
+                    "git": {"commit": "final", "branch": "test", "dirty": False},
+                    "python": "3.12.4",
+                    "duckdb": "1.4.0",
+                },
+                "offline_test_command": "offline",
+                "offline_test_result": "passed",
+                "summary_path": "ignored.json",
+            },
+            "download": {"samples": []},
+            "samples": [sample],
+            "failures": [],
+            "pooled": pooled,
+            "deviation_from_ip_002": "None",
+            "deviation_from_ip_002r": "None",
+            "recovery": {
+                "original_ip_002": {
+                    "implementation_commit": "original",
+                    "status": "UNRESOLVED",
+                    "result_sha256": "original-result",
+                },
+                "ip_002r_pilot": {
+                    "proceed_gate": {"status": "PASS"},
+                    "largest_shard_id": 3,
+                    "largest_shard_row_count": 10,
+                    "checkpoint_file_sha256": "pilot-checkpoint",
+                },
+                "august_recovery": {
+                    "status": "COMPLETE",
+                    "checkpoint_count": 32,
+                    "checkpoint_integrity": "PASS",
+                    "reducer_order_independence": "PASS",
+                    "active_total_august_seconds": 1.0,
+                    "peak_rss_bytes": 1,
+                    "final_recovery_storage_bytes": 1,
+                    "peak_duckdb_temp_growth_bytes": 0,
+                    "recovery_code_git_shas": ["recovery"],
+                    "recovery_module_blob_shas": {"recovery": "blob"},
+                },
+                "june_equivalence": {
+                    "status": "PASS",
+                    "validation_manifest": {
+                        "selected_shard_id": 0,
+                        "shard_count": 1024,
+                        "row_count": 1,
+                    },
+                    "reference_a1_a8_sha256": "equal",
+                },
+            },
+        }
+        report = render_report(summary, summary_sha256="summary")
+        self.assertIn("later recovery does not rewrite the failed first attempt", report)
+        self.assertIn("May and August", report)
+        self.assertLess(report.index("## Pooled metrics"), report.index("## A9"))
+        self.assertIn("Deviation from IP-002R: **None**", report)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ from .recovery import (
     run_pilot,
     select_august_sample,
 )
+from .recovery_run import complete_recovery, finalize_recovery
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -86,6 +87,35 @@ def _parser() -> argparse.ArgumentParser:
     pilot.add_argument("--repository", type=Path, default=REPO_ROOT)
     pilot.add_argument("--shard-count", type=int, choices=(32, 64), default=32)
     pilot.add_argument("--offline-test-result", required=True)
+    complete = subparsers.add_parser("recovery-complete")
+    complete.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
+    complete.add_argument(
+        "--recovery-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002r-recovery",
+    )
+    complete.add_argument("--repository", type=Path, default=REPO_ROOT)
+    complete.add_argument("--offline-test-result", required=True)
+    recovery_finalize = subparsers.add_parser("recovery-finalize")
+    recovery_finalize.add_argument(
+        "--recovery-root",
+        type=Path,
+        default=AUTHORIZED_OUTPUT_ROOT / "ip-002r-recovery",
+    )
+    recovery_finalize.add_argument("--repository", type=Path, default=REPO_ROOT)
+    recovery_finalize.add_argument("--report-path", type=Path, default=REPORT_PATH)
+    recovery_finalize.add_argument(
+        "--feasibility-label",
+        required=True,
+        choices=(
+            "PRACTICALLY_LOW_COST",
+            "MATERIAL_COVERAGE_COST",
+            "SEVERE_COVERAGE_COST",
+            "UNRESOLVED",
+        ),
+    )
+    recovery_finalize.add_argument("--feasibility-rationale", required=True)
+    recovery_finalize.add_argument("--final-test-result", required=True)
     return parser
 
 
@@ -251,6 +281,38 @@ def main() -> int:
             arguments.repository,
             arguments.offline_test_result,
             arguments.shard_count,
+        )
+        print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+        return 0
+    if arguments.command == "recovery-complete":
+        result = complete_recovery(
+            original_output=arguments.original_output,
+            recovery_root=arguments.recovery_root,
+            repository=arguments.repository,
+            offline_test_result=arguments.offline_test_result,
+        )
+        print(
+            json.dumps(
+                {
+                    "status": result["status"],
+                    "samples": [item["actual_hour"] for item in result["samples"]],
+                    "august_recovery": result["recovery"]["august_recovery"],
+                    "june_equivalence": result["recovery"]["june_equivalence"],
+                },
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if arguments.command == "recovery-finalize":
+        result = finalize_recovery(
+            recovery_root=arguments.recovery_root,
+            repository=arguments.repository,
+            report_path=arguments.report_path,
+            feasibility_label=arguments.feasibility_label,
+            feasibility_rationale=arguments.feasibility_rationale,
+            final_test_result=arguments.final_test_result,
         )
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
         return 0

@@ -97,6 +97,52 @@ def render_report(summary: Mapping[str, Any], *, summary_sha256: str) -> str:
         "| Requested | Actual object | Fallback | Bytes | Rows | Row groups | SHA-256 |",
         "| --- | --- | --- | ---: | ---: | ---: | --- |",
     ]
+    recovery = summary.get("recovery")
+    if recovery:
+        original = recovery["original_ip_002"]
+        pilot = recovery["ip_002r_pilot"]
+        august = recovery["august_recovery"]
+        validation = recovery["june_equivalence"]
+        insertion = lines.index("## Run provenance")
+        lines[insertion:insertion] = [
+            "## Execution history and recovery provenance",
+            "",
+            "The evidence was produced in distinct execution stages; later recovery "
+            "does not rewrite the failed first attempt.",
+            "",
+            f"- Original IP-002 implementation commit: "
+            f"`{original['implementation_commit']}`. Its preserved atomic result is "
+            f"**{original['status']}**, SHA-256 `{original['result_sha256']}`.",
+            "- The original engine completed June `2026-06-15T12`; May and August "
+            "failed with the preserved 25 GiB DuckDB out-of-memory errors. Those "
+            "failures are execution-feasibility evidence, not ordering conclusions.",
+            f"- IP-002R 32-shard feasibility pilot: **{pilot['proceed_gate']['status']}**; "
+            f"mechanically largest shard `{pilot['largest_shard_id']}` had "
+            f"{pilot['largest_shard_row_count']} rows and its checkpoint file SHA-256 "
+            f"is `{pilot['checkpoint_file_sha256']}`.",
+            f"- August recovery: **{august['status']}** from "
+            f"{august['checkpoint_count']} immutable checkpoints; integrity "
+            f"**{august['checkpoint_integrity']}** and reducer-order independence "
+            f"**{august['reducer_order_independence']}**.",
+            f"- August active partition-plus-analysis runtime: "
+            f"**{float(august['active_total_august_seconds']):.3f} seconds**; peak RSS "
+            f"**{august['peak_rss_bytes']} bytes**; final ignored recovery storage "
+            f"**{august['final_recovery_storage_bytes']} bytes**; maximum measured "
+            f"DuckDB-temp growth **{august['peak_duckdb_temp_growth_bytes']} bytes**.",
+            f"- June cross-engine validation: **{validation['status']}** on deterministic "
+            f"shard `{validation['validation_manifest']['selected_shard_id']}` of "
+            f"{validation['validation_manifest']['shard_count']} with "
+            f"{validation['validation_manifest']['row_count']} rows. Reference and "
+            f"recovery A1-A8 SHA-256 are both "
+            f"`{validation['reference_a1_a8_sha256']}`; the full June hour was not rerun.",
+            f"- Recovery checkpoint code commits: "
+            f"`{_json(august['recovery_code_git_shas'])}`. Their recovery-module Git "
+            f"blob identities are `{_json(august['recovery_module_blob_shas'])}`.",
+            "",
+            "The next eight sections present raw per-sample A1-A8 observations before "
+            "the descriptive A9 interpretation.",
+            "",
+        ]
     for sample in samples:
         provenance = sample["provenance"]
         lines.append(
@@ -338,14 +384,6 @@ def render_report(summary: Mapping[str, Any], *, summary_sha256: str) -> str:
     lines.extend(
         [
             "",
-            "## A9 — Feasibility conclusion",
-            "",
-            f"Classification: **{pooled['a9']['classification']}**.",
-            "",
-            pooled["a9"]["rationale"],
-            "",
-            pooled["a9"]["interpretation"],
-            "",
             "## Pooled metrics",
             "",
             f"- Rows / archive groups: **{pooled['a1']['row_count']}** / "
@@ -418,6 +456,14 @@ def render_report(summary: Mapping[str, Any], *, summary_sha256: str) -> str:
             f"`{_json(pooled['a1']['schema_statuses'])}`. Differences are observations "
             "of the named files, not inferred collector-version history.",
             "",
+            "## A9 — Feasibility conclusion",
+            "",
+            f"Classification: **{pooled['a9']['classification']}**.",
+            "",
+            pooled["a9"]["rationale"],
+            "",
+            pooled["a9"]["interpretation"],
+            "",
             "## Evidence classification",
             "",
             "### Established by external evidence",
@@ -457,6 +503,8 @@ def render_report(summary: Mapping[str, Any], *, summary_sha256: str) -> str:
             "position, PnL, or strategy operation occurred.",
             "",
             f"Deviation from IP-002: **{summary['deviation_from_ip_002']}**.",
+            f"Deviation from IP-002R: "
+            f"**{summary.get('deviation_from_ip_002r', 'Not applicable')}**.",
             "",
             "ADR-001, `src/`, strategy/risk/execution/portfolio code, and "
             "`docs/research/architecture-interview-notes.md` were not modified.",
