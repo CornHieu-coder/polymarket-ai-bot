@@ -1,13 +1,17 @@
 # pmxt Ordering Audit — Execution Feasibility
 
-Status: **execution research; the scientific replay policy remains unresolved**  
+Status: **local exact audit stopped; scientific replay policy remains unresolved**  
 Verified/reviewed: **2026-08-28**
 
 ## Main idea
 
-Two execution plans for the exact IP-002 audit have now failed their declared feasibility gates. The next attempt must change the computational algorithm rather than increase resources, add more shards, relax the runtime gate, or alter the scientific definitions.
+Three execution plans for the exact IP-002 audit have now failed their predeclared feasibility gates. The project should **stop local exact recovery over the same pmxt hourly files** rather than create a fourth engine, increase resources, or relax the scientific definitions.
 
-The original IP-002 scientific question remains valid: quantify how much state-order ambiguity in published pmxt V2 Polymarket data would cost a conservative fail-closed historical replay. No A9 conclusion has been authorized yet.
+The original IP-002 scientific question remains valid: quantify how much state-order ambiguity in published pmxt V2 Polymarket data would cost a conservative fail-closed historical replay. No A9 conclusion has been authorized.
+
+The execution result is instead:
+
+> Recovering that exact answer from this archive representation is not worth further local computation under the project's declared time/resource budget.
 
 ---
 
@@ -38,7 +42,7 @@ IP-002R kept the scientific definitions frozen and partitioned August by a stabl
 
 ### Resource pilot
 
-The 32-shard pilot passed comfortably:
+The 32-shard pilot initially looked strong:
 
 - partitioning: 343.202 s;
 - largest shard by rows: shard 18;
@@ -52,7 +56,7 @@ The 32-shard pilot passed comfortably:
 
 ### Full recovery gate failure
 
-The pilot's row-count projection did not generalize to other shards. Shard 2 required:
+The row-count projection did not generalize. Shard 2 required:
 
 ```text
 591.329 s
@@ -64,7 +68,7 @@ Using that observed rate conservatively across the 28 then-missing shards projec
 275.954 min
 ```
 
-which exceeded IP-002R's binding 90-minute full-recovery limit. Codex correctly stopped during shard 3 and classified the recovery `RECOVERY_NOT_FEASIBLE`.
+which exceeded IP-002R's binding 90-minute limit. The run stopped during shard 3 as `RECOVERY_NOT_FEASIBLE`.
 
 Preserved recovery state:
 
@@ -77,15 +81,17 @@ Preserved recovery state:
 
 ### Research interpretation
 
-The sharded plan solved the memory problem but not the runtime problem. Row count was an inadequate predictor of shard cost: a shard with fewer rows could be much slower because the expensive work depends on event/group/asset-state structure, not only bytes or rows.
+Sharding solved the memory problem but not the runtime problem. Row count was an inadequate predictor of shard cost; event/group/asset-state structure materially affected runtime.
 
-Therefore **more hash shards are not the next answer**. Increasing to 64/128+ shards may reduce memory further but does not remove the underlying per-group/per-asset analytical work and would violate the already-declared IP-002R stop rule.
+That finding is why more hash shards were rejected rather than tried indefinitely.
 
 ---
 
-## 3. New technical evidence: the archive is already sorted for our exact grouping problem
+## 3. IP-002S — sequential streaming over the source sort order
 
-The pmxt V2 data overview documents each Polymarket hourly Parquet file as sorted by:
+### Why this attempt was justified
+
+pmxt documents each V2 Polymarket hourly Parquet as sorted by:
 
 ```text
 (market, asset_id, timestamp_received)
@@ -93,96 +99,175 @@ The pmxt V2 data overview documents each Polymarket hourly Parquet file as sorte
 
 which is exactly IP-002's archive-availability grouping key, with `(market, asset_id)` also being the complete A7/A8 state-trajectory prefix.
 
-Source, verified 2026-08-28:
+Source reviewed 2026-08-28:
 
 - https://archive.pmxt.dev/docs/v2-data-overview
 
-pmxt explicitly says the row order is preserved at write time and readers that want to exploit it should avoid re-sorting on load.
-
-This creates a materially different execution option:
+This enabled a materially different algorithm:
 
 ```text
 sorted Parquet
-    ↓ sequential batches
+    ↓ bounded Arrow batches
 one contiguous availability group at a time
     ↓
 one contiguous asset trajectory at a time
     ↓
-A1-A8 counters/state
+exact A1-A8 counters/state
 ```
 
-No global hash `GROUP BY`, full-file `ORDER BY`, JOIN, or window operation is required merely to discover groups or state trajectories.
+Physical row order was used only to locate group/asset boundaries. Rows sharing one equal `(market, asset_id, timestamp_received)` key remained an unordered logical set for ambiguity classification.
 
-Apache Arrow's Parquet APIs support iterative `RecordBatch` reads and column projection so a file can be scanned without materializing the entire dataset in memory.
+### Exactness / test result
 
-Sources:
-
-- https://arrow.apache.org/docs/python/generated/pyarrow.parquet.ParquetFile.html
-- https://arrow.apache.org/docs/python/dataset.html
-
-DuckDB's own performance documentation identifies grouping, joining, sorting, and windowing as blocking/memory-intensive operators. That does not make DuckDB unsuitable generally; it explains why a sequential algorithm aligned to the archive's existing sort order is a better candidate for this particular audit.
-
-Sources:
-
-- https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads
-- https://duckdb.org/docs/current/guides/performance/oom
-
----
-
-## 4. Important methodological distinction
-
-Using the documented sort order to **find group boundaries** is not the same as treating row order inside a tied group as causal order.
-
-The scientific rule remains:
+The streaming-specific suite passed:
 
 ```text
-G = equal (market, asset_id, timestamp_received)
+9/9 passed in 5.496 s
 ```
 
-Members of `G` remain an unordered simultaneous-availability set for A2-A5 classification. Published row order may still be inspected only for the already-defined A6 diagnostic. It must never resolve an otherwise ambiguous group.
+The complete offline suite passed:
 
-Thus a streaming implementation can be an execution-only change if it reproduces the frozen IP-002 metrics exactly.
+```text
+114/114 passed in 30.921 s
+```
+
+A direct preserved-recovery-shard comparison was not permitted because the preserved hash-sharded files exhibited physical sort regressions. Rewriting/sorting them solely to manufacture a comparison would have violated the test boundary. The original August W1/W2 source windows themselves passed the monotonic sort assertion.
+
+### Deterministic resource windows
+
+#### W1 — beginning window
+
+- physical range: `[0, 2,000,028)`;
+- rows: 2,000,028;
+- complete assets: 3,885;
+- row groups: 0–1;
+- runtime: 307.311145 s;
+- Arrow batch size: 65,536;
+- batches read/analyzed: 31 / 31;
+- maximum logical group: 205 rows;
+- maximum asset: 103,246 rows;
+- peak process-tree RSS: 428,978,176 bytes;
+- temporary-storage growth: 0 bytes.
+
+#### W2 — midpoint window
+
+- physical range: `[41,353,141, 43,431,984)`;
+- rows: 2,078,843;
+- complete assets: 3,306;
+- row groups: 39–41;
+- runtime: 208.728061 s;
+- Arrow batch size: 65,536;
+- batches read/analyzed: 39 / 33;
+- maximum logical group: 255 rows;
+- maximum asset: 166,416 rows;
+- peak process-tree RSS: 422,998,016 bytes;
+- temporary-storage growth: 0 bytes.
+
+The broader sort checks covered:
+
+- W1: `[0, 2,000,029)` — monotonic;
+- W2: `[40,894,464, 43,431,985)` including the discarded midpoint asset — monotonic.
+
+Maximum observed RSS across the pilot was about 409 MiB.
+
+Combined W1+W2 analysis time:
+
+```text
+516.039206 s
+```
+
+which passed the 600-second combined-window gate.
+
+### Binding runtime gate failure
+
+Measured rates:
+
+```text
+r1 = 0.00015365342150212177 s/row
+r2 = 0.00010040588000152012 s/row
+```
+
+Using the predeclared conservative formula:
+
+```text
+max(r1, r2) * 82,705,648 * 1.5
+```
+
+gave:
+
+```text
+19,062.008689 s
+= 317.700 min
+≈ 5.295 h
+```
+
+The packet required projected full-August runtime <= 30 minutes. Therefore final status was:
+
+```text
+STREAMING_NOT_FEASIBLE
+```
+
+No full-August streaming run, A9, final experiment report, ADR change, push/PR, or production replay followed from this result.
+
+Local streaming implementation commit reported by Codex:
+
+```text
+871a73be4994dbb61ed4aa96c2c03503c97a3286
+```
 
 ---
 
-## 5. Candidate streaming algorithm — not yet authorized for a full sample
+## 4. What the three attempts teach us
 
-A final bounded feasibility pilot should test a direct sequential scanner over the **original preserved August Parquet**, not another repartitioned full run.
+### Memory was not the final bottleneck
 
-Candidate design:
+The sequence was:
 
-1. Read only required columns in bounded Arrow record batches.
-2. Assert the observed composite key never decreases while scanning; fail if the documented sort contract is violated.
-3. Keep only the current archive-availability group in memory for A2-A6 classification.
-4. Keep only the current `(market, asset_id)` state trajectory in memory for A7/A8.
-5. Treat price and size as exact fixed-point/scaled integers or exact Arrow decimals; do not convert to binary floating point.
-6. Parse `bids`/`asks` JSON only for `book` rows; pmxt documents `book` as a tiny fraction of rows.
-7. Compute the global one-hour `timestamp_received` row-count distribution with an exact bounded millisecond counter (at most 3,600,000 in-hour millisecond slots), rather than a full hash aggregation.
-8. Keep representative counterexamples bounded and deterministic.
-9. Do not perform a full-file `GROUP BY`, `ORDER BY`, JOIN, or window solely to reconstruct grouping/state order.
+```text
+monolithic  -> memory failure
+sharding    -> memory safe, runtime failure
+streaming   -> very low memory, CPU/runtime failure
+```
 
-The implementation may use vectorized Arrow/NumPy operations to locate run boundaries. Performance optimizations are allowed only when exact equivalence is demonstrated.
+The streaming algorithm reduced peak memory from multi-GiB/25-GiB failure territory to roughly 0.4 GiB and eliminated temporary spill, yet the exact audit still projected to ~5.3 hours.
+
+That means the remaining cost is largely the actual per-row/per-group/per-asset scientific work required by A1-A8, not merely avoidable global sorting or hashing.
+
+### Scientific methodology and execution strategy stayed separate
+
+Across all three attempts the project did **not** change:
+
+- archive-availability grouping key;
+- source-time treatment;
+- tied-group ambiguity rules;
+- A7 validity/recovery semantics;
+- A8 cadence grids;
+- predeclared scientific sample dates.
+
+Only the computational method changed. That separation is what lets the negative feasibility result be interpreted cleanly.
+
+### Stop rules prevented sunk-cost drift
+
+The correct response to the streaming failure is not to raise the 30-minute gate after seeing the result. The project explicitly declared the streaming pilot to be the final local exact-recovery engine.
 
 ---
 
-## 6. Final feasibility boundary
+## 5. Final local decision boundary
 
-This project should not enter an endless sequence of increasingly elaborate recovery engines.
+Do **not**:
 
-One **streaming feasibility pilot** is justified because it exploits a newly recognized property of the source format that directly matches the scientific grouping/state keys. It is algorithmically different from both failed plans.
+- create a fourth exact pmxt audit engine;
+- add 64/128+ hash shards to evade the previous stop rule;
+- raise RAM/CPU simply to force completion;
+- loosen the scientific ambiguity rules;
+- reinterpret pmxt row/source time as a hidden sequence;
+- claim the candidate fail-closed policy has low or high coverage cost from these execution failures.
 
-If that pilot cannot demonstrate exact equivalence and a conservative projected full-August runtime within its declared budget, then the exact IP-002 pmxt audit should stop as computationally unresolved on the current local environment.
+Instead, move the source decision forward:
 
-At that point the project should choose between:
+1. qualify a historical source that explicitly preserves provider-observed receive ordering and usable L2 snapshots; and
+2. design our own forward sequence-preserving raw collector so future evidence is not dependent on recovering ordering from a lossy archive.
 
-- using pmxt for questions that do not require exact intra-timestamp ordering while collecting its own forward sequence-preserving feed for H2; or
-- evaluating a separate historical provider with explicit receive ordering / snapshots, with provenance, licensing, depth limits, and reproducibility reviewed before adoption.
+A candidate third-party source is evaluated separately in `historical-data-source-strategy.md`; no provider is accepted by this feasibility note.
 
-A commercial provider such as TickFoundry currently advertises nanosecond receive timestamps, capture sequence numbers, and normalized L2 snapshots, but this is vendor-provided evidence and a paid/proprietary dependency. It is a fallback to evaluate, not an accepted source-of-truth decision.
-
-Sources reviewed 2026-08-28:
-
-- https://tickfoundry.com/docs
-- https://tickfoundry.com/pricing
-
-No ADR or production replay rule should change from execution-feasibility results alone.
+No ADR or production replay rule changes from execution-feasibility evidence alone.
