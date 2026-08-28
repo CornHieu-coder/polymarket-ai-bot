@@ -28,3 +28,11 @@
 20. For mutable platform behaviour such as APIs, fees, order semantics, geographic restrictions, or market rules, record the authoritative source and verification date when the fact becomes implementation-relevant, and re-check it before relying on it in live or forward operation.
 21. Architectural and methodological decisions should be traceable from evidence -> assumptions -> decision -> implementation packet -> code/tests -> experiment result.
 22. If new evidence materially undermines an existing decision, do not preserve the decision for consistency alone. Re-open it through an ADR or research update and document the consequences for prior experiments and implementations.
+
+## Feasibility and resource-budget rule
+
+23. Research rigor includes computational feasibility. Before authorizing a materially expensive experiment, estimate the expected data volume, dominant computational complexity, wall-clock time, peak memory, temporary-storage demand, and failure-recovery cost on the machine or environment that will actually run it.
+24. When those costs are materially uncertain, run a bounded, mechanically selected pilot whose purpose is **resource profiling only** before the full experiment. Do not use pilot scientific outcomes to tune the research methodology, sample choice, or acceptance criteria.
+25. Every expensive experiment must declare a resource/time budget or an explicit decision rule for whether the projected full run is practical. If the pilot or first bounded unit shows that the full plan is not practical under that budget, stop and redesign the execution plan rather than brute-forcing the original plan.
+26. Expensive experiments should checkpoint independent completed units atomically where practical, so a later crash or out-of-memory failure does not require recomputing valid earlier work. Recovery artifacts must remain deterministic and provenance-linked.
+27. Separate **scientific methodology** from **execution strategy**. Memory-bounded partitioning, streaming, external sorting, or checkpointing may be redesigned to make a frozen scientific analysis feasible, but any change that alters which observations are included, how ambiguity is classified, or how conclusions are computed requires an explicit methodology review rather than being justified as an optimization.

@@ -43,9 +43,24 @@ State the behaviours that must remain true. Where an invariant exists because of
 
 Define them when relevant; otherwise state that none apply.
 
+## Feasibility and resource budget
+
+For tasks that may process large datasets, perform long-running experiments, or require substantial memory/storage, state before the full run:
+
+- expected input volume and the dominant computational operation;
+- a bounded resource-profiling pilot or other basis for the estimate;
+- expected wall-clock time, peak memory, and temporary-storage demand on the actual execution environment;
+- the predeclared resource/time budget or decision rule that determines whether the full run is practical;
+- the checkpoint/recovery plan for independent expensive units;
+- what Codex must do if the observed resource cost materially exceeds the estimate.
+
+A resource-profiling pilot must be selected mechanically and must not use scientific outcomes to tune the methodology or sample. If feasibility cannot be established, the packet should not authorize brute-forcing the full experiment; stop and redesign the execution strategy while preserving the scientific methodology.
+
+For tasks with negligible resource cost, state that this section is not materially applicable.
+
 ## Failure cases
 
-Identify important edge cases and fault conditions, including failures that could invalidate research conclusions rather than only software failures.
+Identify important edge cases and fault conditions, including failures that could invalidate research conclusions rather than only software failures. For expensive experiments, include resource exhaustion and loss/recovery of completed units.
 
 ## Required tests
 

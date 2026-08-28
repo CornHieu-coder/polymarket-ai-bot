@@ -1,7 +1,7 @@
 # pmxt Historical Ordering Risk
 
-Status: **pre-audit research note; no production replay rule is frozen by this document**  
-Verified/reviewed: **2026-08-27**
+Status: **audit in progress; no production replay rule is frozen by this document**  
+Verified/reviewed: **2026-08-28**
 
 ## Main idea
 
@@ -9,7 +9,7 @@ The public pmxt V2 archive is useful historical L2 evidence, but the currently p
 
 The remaining question is no longer whether ordering ambiguity can exist. Current archive/collector evidence shows that it can. The next research question is how often the published archive loses order information that matters to reconstructed state, and how much usable replay coverage a conservative policy would sacrifice.
 
-This note separates external evidence from the candidate V0 policy that will be tested by `IP-002-pmxt-ordering-ambiguity-audit.md`.
+This note separates external evidence from the candidate V0 policy being tested by `IP-002-pmxt-ordering-ambiguity-audit.md`. The first full execution attempt was computationally infeasible on two of the three samples; `IP-002R-pmxt-ordering-audit-recovery.md` now governs a bounded memory-safe recovery without changing the scientific definitions.
 
 ---
 
@@ -256,7 +256,32 @@ This separation is **not accepted by this note**. It will be decided together wi
 
 ---
 
-## 7. Decision boundary
+## 7. First IP-002 execution attempt: feasibility failure, not scientific conclusion
+
+The first full IP-002 execution attempt downloaded and hash-preserved all three predeclared hourly samples and ran the frozen A1-A8 analyzer under a 25 GiB DuckDB memory limit.
+
+Its final atomic result was preserved with SHA-256:
+
+```text
+1fa6594ce2f46158af127d5e19966b6af5c69f1e38d22b3be1a6661cb83c2513
+```
+
+Outcome:
+
+- June completed successfully;
+- May failed with a DuckDB out-of-memory error;
+- August failed with a DuckDB out-of-memory error;
+- overall result: `UNRESOLVED` because IP-002 requires at least two successfully audited samples.
+
+This is an **execution-feasibility failure**, not evidence that the candidate replay policy is good or bad. The raw Parquet evidence remained intact, and no A9 conclusion was authorized.
+
+The run also exposed a recovery weakness: expensive per-file work was not independently checkpointed before the final combined artifact, so completed units were unnecessarily coupled to one long-running process.
+
+`IP-002R-pmxt-ordering-audit-recovery.md` therefore freezes the scientific definitions and changes only the execution strategy: deterministic per-asset sharding, bounded resource profiling before the full recovery, immutable shard checkpoints, and explicit memory/time/storage stop rules. June is reused; recovery targets August only unless preservation checks fail.
+
+---
+
+## 8. Decision boundary
 
 Do **not** yet:
 
@@ -265,6 +290,7 @@ Do **not** yet:
 - use Parquet row order as historical causal order;
 - use source timestamp as an undocumented sequence number;
 - claim `timestamp_received` has one universal per-event meaning across all pmxt historical versions;
-- discard pmxt merely because some groups are ambiguous.
+- discard pmxt merely because some groups are ambiguous;
+- interpret the first IP-002 OOM failures as scientific evidence about ordering quality.
 
-The next step is `IP-002-pmxt-ordering-ambiguity-audit.md`. Its result will determine whether the candidate atomic-group/fail-closed policy is practical, needs refinement, or makes pmxt unsuitable for some H2 replay regimes.
+The next step is the bounded recovery in `IP-002R-pmxt-ordering-audit-recovery.md`. Its result will either complete the original IP-002 evidence requirement or establish that the audit remains computationally impractical under the declared budget.
