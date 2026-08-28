@@ -13,6 +13,7 @@ This file is the authoritative map of project documentation. Research should lea
   - [Data documentation map](data/README.md)
   - [Market data and replay protocol](data/market-data-and-replay.md)
   - [pmxt historical ordering risk](data/pmxt-historical-ordering-risk.md) — pre-audit evidence and unresolved ordering/availability questions for historical pmxt replay.
+  - [pmxt ordering-audit execution feasibility](data/pmxt-ordering-audit-execution-feasibility.md) — records failed monolithic/hash-sharded execution plans and the evidence basis for the final bounded sorted-streaming pilot.
 - [`design/`](design/) owns system architecture and engineering decisions.
   - [Architecture](design/architecture.md)
   - [Execution model](design/execution-model.md)
@@ -24,6 +25,7 @@ This file is the authoritative map of project documentation. Research should lea
   - [IP-001: Market feed contract probe](implementation-packets/IP-001-market-feed-contract-probe.md)
   - [IP-002: pmxt historical ordering ambiguity audit](implementation-packets/IP-002-pmxt-ordering-ambiguity-audit.md)
   - [IP-002R: memory-bounded recovery for the pmxt ordering audit](implementation-packets/IP-002R-pmxt-ordering-audit-recovery.md)
+  - [IP-002S: sorted-streaming feasibility pilot](implementation-packets/IP-002S-pmxt-ordering-streaming-pilot.md)
 - [`experiments/`](experiments/) owns experimental methodology, runs, and results.
   - [Experiment log](experiments/experiment-log.md)
   - [Market feed contract probe](experiments/market-feed-contract-probe.md)
