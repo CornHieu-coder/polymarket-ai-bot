@@ -23,6 +23,7 @@ This file is the authoritative map of project documentation. Research should lea
   - [IP-000: Repository bootstrap](implementation-packets/IP-000-repository-bootstrap.md)
   - [IP-001: Market feed contract probe](implementation-packets/IP-001-market-feed-contract-probe.md)
   - [IP-002: pmxt historical ordering ambiguity audit](implementation-packets/IP-002-pmxt-ordering-ambiguity-audit.md)
+  - [IP-002R: memory-bounded recovery for the pmxt ordering audit](implementation-packets/IP-002R-pmxt-ordering-audit-recovery.md)
 - [`experiments/`](experiments/) owns experimental methodology, runs, and results.
   - [Experiment log](experiments/experiment-log.md)
   - [Market feed contract probe](experiments/market-feed-contract-probe.md)
