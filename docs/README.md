@@ -9,11 +9,13 @@ This file is the authoritative map of project documentation. Research should lea
   - [Hypotheses](research/hypotheses.md)
   - [Assumptions and methodological positions](research/assumptions.md)
   - [Architecture interview notes](research/architecture-interview-notes.md) — non-authoritative concise recall sheet for resume/interview drills; authoritative design/research documents win on conflict.
+  - [Market-data audit interview case study](research/market-data-audit-interview-case-study.md) — short, memorable account of the failed monolithic/sharded/streaming audit attempts and the engineering lessons from stopping correctly.
 - [`data/`](data/) owns source-of-truth policy, raw-data contracts, replay semantics, provenance, and data-quality rules.
   - [Data documentation map](data/README.md)
   - [Market data and replay protocol](data/market-data-and-replay.md)
-  - [pmxt historical ordering risk](data/pmxt-historical-ordering-risk.md) — pre-audit evidence and unresolved ordering/availability questions for historical pmxt replay.
-  - [pmxt ordering-audit execution feasibility](data/pmxt-ordering-audit-execution-feasibility.md) — records failed monolithic/hash-sharded execution plans and the evidence basis for the final bounded sorted-streaming pilot.
+  - [pmxt historical ordering risk](data/pmxt-historical-ordering-risk.md) — evidence and unresolved ordering/availability questions for historical pmxt replay.
+  - [pmxt ordering-audit execution feasibility](data/pmxt-ordering-audit-execution-feasibility.md) — records the monolithic, hash-sharded, and sorted-streaming feasibility results.
+  - [Historical data source strategy](data/historical-data-source-strategy.md) — post-IP-002 source direction: stop exact local pmxt recovery, qualify an explicitly ordered historical source, and preserve future evidence with our own collector.
 - [`design/`](design/) owns system architecture and engineering decisions.
   - [Architecture](design/architecture.md)
   - [Execution model](design/execution-model.md)
@@ -26,6 +28,7 @@ This file is the authoritative map of project documentation. Research should lea
   - [IP-002: pmxt historical ordering ambiguity audit](implementation-packets/IP-002-pmxt-ordering-ambiguity-audit.md)
   - [IP-002R: memory-bounded recovery for the pmxt ordering audit](implementation-packets/IP-002R-pmxt-ordering-audit-recovery.md)
   - [IP-002S: sorted-streaming feasibility pilot](implementation-packets/IP-002S-pmxt-ordering-streaming-pilot.md)
+  - [IP-003: historical data source qualification](implementation-packets/IP-003-historical-data-source-qualification.md)
 - [`experiments/`](experiments/) owns experimental methodology, runs, and results.
   - [Experiment log](experiments/experiment-log.md)
   - [Market feed contract probe](experiments/market-feed-contract-probe.md)
