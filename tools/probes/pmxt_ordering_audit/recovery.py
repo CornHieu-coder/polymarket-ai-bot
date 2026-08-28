@@ -8,7 +8,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 import time
 from collections import Counter
 from datetime import datetime, timezone
@@ -33,6 +32,13 @@ MAX_PROJECTED_REMAINING_SECONDS = 90 * 60
 ORIGINAL_ANALYSIS_SHA256 = (
     "1fa6594ce2f46158af127d5e19966b6af5c69f1e38d22b3be1a6661cb83c2513"
 )
+IP_002R_CLOSED_MESSAGE = (
+    "IP-002R is closed as RECOVERY_NOT_FEASIBLE; recovery execution is disabled"
+)
+
+
+class IP002RClosedError(RuntimeError):
+    """Raised before any obsolete IP-002R execution path can mutate evidence."""
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -612,100 +618,9 @@ def run_pilot(
     offline_test_result: str,
     shard_count: int = 32,
 ) -> dict[str, Any]:
-    if shard_count not in {32, 64}:
-        raise ValueError("real recovery pilot permits only 32 or 64 shards")
-    evidence = verify_preserved_evidence(original_output)
-    sample = next(item for item in evidence["samples"] if item["requested_hour"] == "2026-08-01T12")
-    recovery_root.mkdir(parents=True, exist_ok=True)
-    worker = [sys.executable, "-m", "tools.probes.pmxt_ordering_audit"]
-    if _partition_manifest_path(recovery_root, shard_count).is_file():
-        partition_resource = {"exit_code": 0, "elapsed_seconds": 0.0, "peak_rss_bytes": 0, "peak_temp_growth_bytes": 0, "reused": True}
-    else:
-        partition_resource = _monitor_process(
-            worker + ["recovery-partition-worker", "--original-output", str(original_output), "--recovery-root", str(recovery_root), "--shard-count", str(shard_count)],
-            recovery_root,
-        )
-        if partition_resource["exit_code"]:
-            raise RuntimeError("partition worker failed")
-    manifest_path = _partition_manifest_path(recovery_root, shard_count)
-    manifest = verify_partition(manifest_path, str(sample["sha256"]))
-    largest = min(manifest["shards"], key=lambda item: (-int(item["row_count"]), int(item["shard_id"])))
-    checkpoint_directory = recovery_root / f"checkpoints-{shard_count:02d}"
-    checkpoint_path = checkpoint_directory / f"shard-{int(largest['shard_id']):03d}.json"
-    if checkpoint_path.is_file():
-        verify_checkpoint(checkpoint_path)
-        analysis_resource = {"exit_code": 0, "elapsed_seconds": 0.0, "peak_rss_bytes": 0, "peak_temp_growth_bytes": 0, "reused": True}
-    else:
-        analysis_resource = _monitor_process(
-            worker + ["recovery-shard-worker", "--original-output", str(original_output), "--partition-manifest", str(manifest_path), "--shard-id", str(largest["shard_id"]), "--checkpoint-directory", str(checkpoint_directory), "--repository", str(repository)],
-            checkpoint_directory / "work",
-        )
-        if analysis_resource["exit_code"]:
-            raise RuntimeError("largest-shard worker failed")
-    checkpoint = verify_checkpoint(checkpoint_path)
-    analysis_seconds = float(analysis_resource["elapsed_seconds"])
-    remaining = analysis_seconds * (shard_count - 1)
-    projected_full = float(manifest["partition_elapsed_seconds"]) + analysis_seconds * shard_count
-    partition_bytes = sum(int(item["byte_length"]) for item in manifest["shards"])
-    checkpoint_size = checkpoint_path.stat().st_size
-    projected_temp = (
-        partition_bytes
-        + int(analysis_resource["peak_temp_growth_bytes"]) * shard_count
-        + checkpoint_size * shard_count
-    )
-    peak_rss = max(int(partition_resource["peak_rss_bytes"]), int(analysis_resource["peak_rss_bytes"]))
-    # The exact semantic suite is required to pass before this command is invoked.
-    semantic_equivalence = True
-    gate = resource_gate(
-        peak_rss_bytes=peak_rss,
-        failed=False,
-        combined_elapsed_seconds=float(manifest["partition_elapsed_seconds"]) + analysis_seconds,
-        projected_remaining_seconds=remaining,
-        projected_temp_bytes=projected_temp,
-        semantic_equivalence=semantic_equivalence,
-    )
-    result = {
-        "format": "ip-002r-resource-pilot-v1",
-        "completed_at": _utc_now(),
-        "resource_only": True,
-        "scientific_outcomes_inspected_for_gate": False,
-        "offline_test_result": offline_test_result,
-        "preserved_evidence": evidence,
-        "shard_count": shard_count,
-        "shard_algorithm": SHARD_ALGORITHM,
-        "partition_elapsed_seconds": manifest["partition_elapsed_seconds"],
-        "partition_resource_monitor": partition_resource,
-        "total_august_rows": manifest["total_rows"],
-        "shard_row_counts": [{"shard_id": item["shard_id"], "row_count": item["row_count"]} for item in manifest["shards"]],
-        "largest_shard_id": largest["shard_id"],
-        "largest_shard_row_count": largest["row_count"],
-        "largest_shard_share": int(largest["row_count"]) / int(manifest["total_rows"]),
-        "largest_shard_analysis_elapsed_seconds": analysis_seconds,
-        "partition_peak_rss_bytes": int(partition_resource["peak_rss_bytes"]),
-        "largest_shard_peak_rss_bytes": int(analysis_resource["peak_rss_bytes"]),
-        "peak_rss_bytes": peak_rss,
-        "configured_duckdb_memory": DUCKDB_MEMORY_LIMIT,
-        "duckdb_peak_memory_bytes": None,
-        "duckdb_peak_memory_note": "DuckDB 1.4.0 does not expose a reliable per-process peak-memory setting through this runner; OS process-tree peak RSS is recorded.",
-        "configured_threads": DUCKDB_THREADS,
-        "partition_output_and_temp_peak_growth_bytes": int(partition_resource["peak_temp_growth_bytes"]),
-        "largest_shard_duckdb_temp_peak_growth_bytes": int(analysis_resource["peak_temp_growth_bytes"]),
-        "temp_measurement_note": "Partition monitoring conservatively includes immutable partition output plus DuckDB spill; shard monitoring watches its DuckDB work directory.",
-        "projected_temp_storage_bytes": projected_temp,
-        "checkpoint_path": str(checkpoint_path.resolve()),
-        "checkpoint_file_sha256": sha256_file(checkpoint_path),
-        "checkpoint_size_bytes": checkpoint_size,
-        "projected_remaining_august_seconds": remaining,
-        "projected_full_august_seconds": projected_full,
-        "semantic_equivalence": {"status": "PASS", "basis": "required offline exact sharded-vs-unsharded regression suite"},
-        "proceed_gate": gate,
-        "remaining_shards_launched": 0,
-    }
-    result_path = recovery_root / f"resource-pilot-{shard_count:02d}.json"
-    if result_path.exists():
-        raise FileExistsError(f"immutable pilot result already exists: {result_path}")
-    _atomic_create_json(result_path, result)
-    return result
+    """Reject reruns now that IP-002R has reached its binding stop condition."""
+
+    raise IP002RClosedError(IP_002R_CLOSED_MESSAGE)
 
 
 def select_august_sample(original_output: Path) -> dict[str, Any]:

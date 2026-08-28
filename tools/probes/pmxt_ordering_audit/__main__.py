@@ -22,6 +22,8 @@ from .engine import (
 from .report import render_report, write_report
 from .core import sha256_file
 from .recovery import (
+    IP002RClosedError,
+    IP_002R_CLOSED_MESSAGE,
     _atomic_create_json,
     analyze_shard,
     partition_sample,
@@ -73,17 +75,23 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     finalize.add_argument("--feasibility-rationale", required=True)
-    partition_worker = subparsers.add_parser("recovery-partition-worker")
+    partition_worker = subparsers.add_parser(
+        "recovery-partition-worker", help="DISABLED: IP-002R is closed"
+    )
     partition_worker.add_argument("--original-output", type=Path, required=True)
     partition_worker.add_argument("--recovery-root", type=Path, required=True)
     partition_worker.add_argument("--shard-count", type=int, choices=(32, 64), required=True)
-    shard_worker = subparsers.add_parser("recovery-shard-worker")
+    shard_worker = subparsers.add_parser(
+        "recovery-shard-worker", help="DISABLED: IP-002R is closed"
+    )
     shard_worker.add_argument("--original-output", type=Path, required=True)
     shard_worker.add_argument("--partition-manifest", type=Path, required=True)
     shard_worker.add_argument("--shard-id", type=int, required=True)
     shard_worker.add_argument("--checkpoint-directory", type=Path, required=True)
     shard_worker.add_argument("--repository", type=Path, required=True)
-    pilot = subparsers.add_parser("recovery-pilot")
+    pilot = subparsers.add_parser(
+        "recovery-pilot", help="DISABLED: IP-002R is closed"
+    )
     pilot.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
     pilot.add_argument(
         "--recovery-root",
@@ -93,7 +101,9 @@ def _parser() -> argparse.ArgumentParser:
     pilot.add_argument("--repository", type=Path, default=REPO_ROOT)
     pilot.add_argument("--shard-count", type=int, choices=(32, 64), default=32)
     pilot.add_argument("--offline-test-result", required=True)
-    complete = subparsers.add_parser("recovery-complete")
+    complete = subparsers.add_parser(
+        "recovery-complete", help="DISABLED: IP-002R is closed"
+    )
     complete.add_argument("--original-output", type=Path, default=DEFAULT_OUTPUT)
     complete.add_argument(
         "--recovery-root",
@@ -102,7 +112,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     complete.add_argument("--repository", type=Path, default=REPO_ROOT)
     complete.add_argument("--offline-test-result", required=True)
-    recovery_finalize = subparsers.add_parser("recovery-finalize")
+    recovery_finalize = subparsers.add_parser(
+        "recovery-finalize", help="DISABLED: IP-002R is closed"
+    )
     recovery_finalize.add_argument(
         "--recovery-root",
         type=Path,
@@ -297,6 +309,14 @@ def _finalize(arguments: argparse.Namespace) -> int:
 
 def main() -> int:
     arguments = _parser().parse_args()
+    if arguments.command in {
+        "recovery-partition-worker",
+        "recovery-shard-worker",
+        "recovery-pilot",
+        "recovery-complete",
+        "recovery-finalize",
+    }:
+        raise IP002RClosedError(IP_002R_CLOSED_MESSAGE)
     if arguments.command == "download":
         result = acquire_samples(arguments.output_directory)
         print(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))

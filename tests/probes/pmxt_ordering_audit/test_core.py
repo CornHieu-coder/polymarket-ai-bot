@@ -99,6 +99,27 @@ class L2ClassificationTests(unittest.TestCase):
         self.assertEqual(result["l2_status"], "AMBIGUOUS")
         self.assertEqual(result["conflicting_price_keys"], 1)
 
+    def test_negative_replacement_size_is_unresolved(self) -> None:
+        result = classify_availability_group(
+            [change("BUY", "0.40", "-1"), change("SELL", "0.60", "12")]
+        )
+        self.assertEqual(result["l2_status"], "UNRESOLVED")
+        self.assertEqual(result["l2_reason"], "price_change_parse_failure")
+        self.assertEqual(result["repeated_price_keys"], 0)
+        self.assertEqual(result["conflicting_price_keys"], 0)
+        self.assertIn("non-negative replacement size", result["parse_errors"][0])
+
+    def test_malformed_price_change_result_is_order_independent(self) -> None:
+        rows = [
+            change("BUY", "0.40", "10"),
+            change("BUY", "0.40", "25"),
+            change("SELL", "0.60", "-1"),
+        ]
+        forward = classify_availability_group(rows)
+        reverse = classify_availability_group(list(reversed(rows)))
+        self.assertEqual(forward, reverse)
+        self.assertEqual(forward["conflicting_replacements"], [])
+
     def test_identical_books_are_invariant_after_canonical_parsing(self) -> None:
         reordered = book(
             bids='[["0.400","10"],["0.3","2.0"]]',

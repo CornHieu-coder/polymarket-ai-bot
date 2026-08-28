@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import duckdb
 
@@ -12,12 +13,14 @@ from tools.probes.pmxt_ordering_audit.core import sha256_file
 from tools.probes.pmxt_ordering_audit.engine import analyze_file
 from tools.probes.pmxt_ordering_audit.engine import pool_results
 from tools.probes.pmxt_ordering_audit.recovery import (
+    IP002RClosedError,
     SHARD_ALGORITHM,
     SOURCE_ROW_ORDINAL,
     _exact_intermediates,
     partition_sample,
     reduce_checkpoints,
     resource_gate,
+    run_pilot,
     shard_sql,
     stable_shard_id,
     verify_checkpoint,
@@ -27,8 +30,11 @@ from tools.probes.pmxt_ordering_audit.recovery import (
 from tools.probes.pmxt_ordering_audit.recovery_run import (
     _validation_fixture,
     _validation_sample,
+    complete_recovery,
+    finalize_recovery,
 )
 from tools.probes.pmxt_ordering_audit.report import render_report
+from tools.probes.pmxt_ordering_audit.__main__ import main as audit_cli_main
 
 
 class RecoveryTests(unittest.TestCase):
@@ -253,6 +259,52 @@ class RecoveryTests(unittest.TestCase):
         ):
             arguments = {**passing, key: bad}
             self.assertEqual(resource_gate(**arguments)["status"], "FAIL", key)
+
+    def test_closed_ip002r_execution_paths_fail_before_writing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            recovery_root = root / "recovery"
+            original_output = root / "original"
+            report_path = root / "report.md"
+            with self.assertRaisesRegex(IP002RClosedError, "RECOVERY_NOT_FEASIBLE"):
+                run_pilot(
+                    original_output,
+                    recovery_root,
+                    root,
+                    "tests passed",
+                )
+            with self.assertRaisesRegex(IP002RClosedError, "RECOVERY_NOT_FEASIBLE"):
+                complete_recovery(
+                    original_output=original_output,
+                    recovery_root=recovery_root,
+                    repository=root,
+                    offline_test_result="tests passed",
+                )
+            with self.assertRaisesRegex(IP002RClosedError, "RECOVERY_NOT_FEASIBLE"):
+                finalize_recovery(
+                    recovery_root=recovery_root,
+                    repository=root,
+                    report_path=report_path,
+                    feasibility_label="UNRESOLVED",
+                    feasibility_rationale="closed",
+                    final_test_result="tests passed",
+                )
+            with patch(
+                "sys.argv",
+                [
+                    "pmxt-audit",
+                    "recovery-pilot",
+                    "--offline-test-result",
+                    "tests passed",
+                ],
+            ):
+                with self.assertRaisesRegex(
+                    IP002RClosedError, "RECOVERY_NOT_FEASIBLE"
+                ):
+                    audit_cli_main()
+            self.assertFalse(recovery_root.exists())
+            self.assertFalse(original_output.exists())
+            self.assertFalse(report_path.exists())
 
     def test_june_validation_unit_matches_reference_and_recovery_engines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

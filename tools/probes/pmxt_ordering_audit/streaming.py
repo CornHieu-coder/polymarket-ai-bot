@@ -25,7 +25,13 @@ from .core import (
     normalize_json,
     sha256_file,
 )
-from .engine import _book_counterexample, _schema, git_provenance
+from .engine import (
+    _book_counterexample,
+    _schema,
+    enforce_a1_a8_schema,
+    git_provenance,
+    require_non_null_grouping_values,
+)
 from .recovery import (
     ORIGINAL_ANALYSIS_SHA256,
     _atomic_create_json,
@@ -208,11 +214,10 @@ class StreamingAggregates:
         }
 
     def consume(self, row: dict[str, Any]) -> None:
-        market = row.get("market")
-        asset = row.get("asset_id")
-        received = row.get("timestamp_received")
-        if market is None or asset is None or received is None:
-            raise ValueError("stream sort key contains null; exact grouping cannot continue")
+        require_non_null_grouping_values(row, context="stream row")
+        market = row["market"]
+        asset = row["asset_id"]
+        received = row["timestamp_received"]
         key = (market, asset, received)
         if self.previous_sort_key is not None and key < self.previous_sort_key:
             raise SortContractError(
@@ -326,7 +331,12 @@ class StreamingAggregates:
         price_rows = [row for row in rows if row.get("event_type") == "price_change"]
         for row in price_rows:
             side, price, size = row.get("side"), row.get("price"), row.get("size")
-            if side not in {"BUY", "SELL"} or price is None or size is None:
+            if (
+                side not in {"BUY", "SELL"}
+                or price is None
+                or size is None
+                or size < 0
+            ):
                 malformed = True
                 continue
             key = (str(side), price)
@@ -336,19 +346,20 @@ class StreamingAggregates:
         conflicting = sum(len(value) > 1 for value in key_sizes.values())
         if counts["book"] == 0 and counts["price_change"] > 1:
             self.a3["pure"] += 1
-            if repeated == 0:
-                self.a3["distinct"] += 1
-            elif conflicting == 0:
-                self.a3["idempotent"] += 1
-            if conflicting:
-                self.a3["conflicting"] += 1
             if malformed:
                 self.a3["malformed"] += 1
+            else:
+                if repeated == 0:
+                    self.a3["distinct"] += 1
+                elif conflicting == 0:
+                    self.a3["idempotent"] += 1
+                if conflicting:
+                    self.a3["conflicting"] += 1
             signatures = Counter(_signature(row) for row in price_rows)
             self.a3["duplicate_rows"] += sum(value - 1 for value in signatures.values())
             self.a3["duplicate_signatures"] += sum(value > 1 for value in signatures.values())
             for (side, price), sizes in key_sizes.items():
-                if len(sizes) <= 1:
+                if malformed or len(sizes) <= 1:
                     continue
                 matching = [
                     row
@@ -381,7 +392,7 @@ class StreamingAggregates:
                         Decimal(value["price"]),
                     ),
                 )
-        return {"malformed": malformed, "conflicting": conflicting}
+        return {"malformed": malformed, "conflicting": conflicting and not malformed}
 
     def _a4_group(
         self, rows: Sequence[Mapping[str, Any]], classification: Mapping[str, Any]
@@ -843,7 +854,13 @@ def analyze_stream(
     columns = list(EXPECTED_COLUMNS)
     if "_ip002r_source_row_ordinal" in arrow_names:
         columns.append("_ip002r_source_row_ordinal")
-    schema = _duckdb_schema(source_schema_path or path)
+    schema_path = source_schema_path or path
+    schema = _duckdb_schema(schema_path)
+    analysis_schema = (
+        schema if schema_path.resolve() == path.resolve() else _duckdb_schema(path)
+    )
+    enforce_a1_a8_schema(schema, source_label=str(schema_path))
+    enforce_a1_a8_schema(analysis_schema, source_label=str(path))
     analyzer = StreamingAggregates(hour=actual_hour, schema=schema)
     started = time.perf_counter()
     batches_read = 0
@@ -874,11 +891,12 @@ def analyze_stream(
             row_index = physical_index
             physical_index += 1
             last_tested = physical_index
-            market = values.get("market")
-            asset_id = values.get("asset_id")
-            received = values.get("timestamp_received")
-            if market is None or asset_id is None or received is None:
-                raise ValueError("pilot window sort prefix contains null")
+            require_non_null_grouping_values(
+                values, context=f"stream physical row {row_index}"
+            )
+            market = values["market"]
+            asset_id = values["asset_id"]
+            received = values["timestamp_received"]
             tested_key = (market, asset_id, received)
             if previous_tested_key is not None and tested_key < previous_tested_key:
                 raise SortContractError(

@@ -177,10 +177,15 @@ def classify_availability_group(rows: Sequence[Mapping[str, Any]]) -> dict[str, 
                     raise AuditParseError(f"price_change.side is invalid: {side!r}")
                 price = parse_decimal(row.get("price"), "price_change.price")
                 size = parse_decimal(row.get("size"), "price_change.size")
+                if size < 0:
+                    raise AuditParseError(
+                        "price_change.size must be a non-negative replacement size"
+                    )
                 key = (side, price)
                 price_key_counts[key] += 1
                 price_key_sizes[key].add(size)
         except AuditParseError as exc:
+            price_key_sizes.clear()
             parse_errors.append(str(exc))
             l2_status = "UNRESOLVED"
             l2_reason = "price_change_parse_failure"
@@ -227,6 +232,10 @@ def classify_availability_group(rows: Sequence[Mapping[str, Any]]) -> dict[str, 
                             )
                         price = parse_decimal(row.get("price"), "price_change.price")
                         size = parse_decimal(row.get("size"), "price_change.size")
+                        if size < 0:
+                            raise AuditParseError(
+                                "price_change.size must be a non-negative replacement size"
+                            )
                         existing = snapshot.level_size(side, price)
                         if size == 0:
                             idempotent = idempotent and existing is None

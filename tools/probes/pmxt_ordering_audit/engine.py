@@ -63,6 +63,67 @@ EXPECTED_DUCKDB_TYPES = {
 }
 
 
+class AuditPreflightError(ValueError):
+    """Raised when a file cannot safely enter the frozen A1-A8 pipeline."""
+
+
+def enforce_a1_a8_schema(
+    schema: Mapping[str, Any], *, source_label: str
+) -> None:
+    """Require every frozen A1-A8 field to have its exact compatible type."""
+
+    missing = [name for name in EXPECTED_COLUMNS if name in schema["missing_columns"]]
+    mismatches = list(schema["type_mismatches"])
+    if missing or mismatches:
+        raise AuditPreflightError(
+            f"A1-A8 schema preflight failed for {source_label}: "
+            f"missing={missing}, type_mismatches={normalize_json(mismatches)}"
+        )
+
+
+def require_non_null_grouping_values(
+    values: Mapping[str, Any], *, context: str
+) -> None:
+    """Fail the entire file when any archive-availability key field is null."""
+
+    null_fields = [
+        name
+        for name in ("market", "asset_id", "timestamp_received")
+        if values.get(name) is None
+    ]
+    if null_fields:
+        raise AuditPreflightError(
+            f"null archive-availability grouping fields in {context}: {null_fields}"
+        )
+
+
+def _enforce_non_null_file_grouping_fields(
+    connection: duckdb.DuckDBPyConnection, path: Path
+) -> None:
+    counts = connection.execute(
+        """
+        SELECT COUNT_IF(market IS NULL)::BIGINT,
+               COUNT_IF(asset_id IS NULL)::BIGINT,
+               COUNT_IF(timestamp_received IS NULL)::BIGINT
+        FROM read_parquet(?)
+        """,
+        [str(path)],
+    ).fetchone()
+    assert counts is not None
+    failures = {
+        name: int(count)
+        for name, count in zip(
+            ("market", "asset_id", "timestamp_received"), counts, strict=True
+        )
+        if int(count) > 0
+    }
+    if failures:
+        raise AuditPreflightError(
+            "null archive-availability grouping fields fail the entire file: "
+            f"{failures}"
+        )
+
+
 def _sql_path(path: Path) -> str:
     return str(path.resolve()).replace("'", "''")
 
@@ -280,13 +341,10 @@ def _create_analysis_tables(
                    event_type = 'price_change'
                    AND (
                        side IS NULL OR side NOT IN ('BUY', 'SELL')
-                       OR price IS NULL OR size IS NULL
+                       OR price IS NULL OR size IS NULL OR size < 0
                    )
                )::BIGINT AS malformed_price_changes
         FROM events
-        WHERE market IS NOT NULL
-          AND asset_id IS NOT NULL
-          AND timestamp_received IS NOT NULL
         GROUP BY market, asset_id, timestamp_received
         """
     )
@@ -298,12 +356,10 @@ def _create_analysis_tables(
                COUNT(DISTINCT size)::BIGINT AS unique_size_count
         FROM events
         WHERE event_type = 'price_change'
-          AND market IS NOT NULL
-          AND asset_id IS NOT NULL
-          AND timestamp_received IS NOT NULL
           AND side IN ('BUY', 'SELL')
           AND price IS NOT NULL
           AND size IS NOT NULL
+          AND size >= 0
         GROUP BY market, asset_id, timestamp_received, side, price
         """
     )
@@ -488,12 +544,19 @@ def _a3(connection: duckdb.DuckDBPyConnection) -> dict[str, Any]:
     totals = connection.execute(
         """
         SELECT COUNT(*)::BIGINT,
-               COUNT_IF(COALESCE(p.repeated_price_keys, 0) = 0)::BIGINT,
                COUNT_IF(
-                   COALESCE(p.repeated_price_keys, 0) > 0
+                   g.malformed_price_changes = 0
+                   AND COALESCE(p.repeated_price_keys, 0) = 0
+               )::BIGINT,
+               COUNT_IF(
+                   g.malformed_price_changes = 0
+                   AND COALESCE(p.repeated_price_keys, 0) > 0
                    AND COALESCE(p.conflicting_price_keys, 0) = 0
                )::BIGINT,
-               COUNT_IF(COALESCE(p.conflicting_price_keys, 0) > 0)::BIGINT,
+               COUNT_IF(
+                   g.malformed_price_changes = 0
+                   AND COALESCE(p.conflicting_price_keys, 0) > 0
+               )::BIGINT,
                COUNT_IF(g.malformed_price_changes > 0)::BIGINT
         FROM group_base AS g
         LEFT JOIN price_group_stats AS p
@@ -549,6 +612,7 @@ def _a3(connection: duckdb.DuckDBPyConnection) -> dict[str, Any]:
               USING (market, asset_id, timestamp_received)
             WHERE g.book_count = 0
               AND g.price_change_count > 1
+              AND g.malformed_price_changes = 0
               AND p.unique_size_count > 1
             GROUP BY e.market, e.asset_id, e.timestamp_received, e.side, e.price
             ORDER BY e.timestamp_received, e.market, e.asset_id, e.side, e.price
@@ -1187,15 +1251,14 @@ def analyze_file(
         if file_meta is None:
             raise ValueError("missing Parquet file metadata")
         schema = _schema(connection, schema_path)
+        analysis_schema = (
+            schema if schema_path == path else _schema(connection, path)
+        )
+        enforce_a1_a8_schema(schema, source_label=str(schema_path))
+        enforce_a1_a8_schema(analysis_schema, source_label=str(path))
+        _enforce_non_null_file_grouping_fields(connection, path)
     finally:
         connection.close()
-    missing_required = [
-        name
-        for name in ("market", "asset_id", "timestamp_received", "timestamp", "event_type")
-        if name in schema["missing_columns"]
-    ]
-    if missing_required:
-        raise ValueError(f"required columns missing: {', '.join(missing_required)}")
 
     working_directory.mkdir(parents=True, exist_ok=True)
     temp_directory = working_directory / f"duckdb-temp-{sample['sha256'][:16]}"

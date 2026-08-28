@@ -14,10 +14,12 @@ from typing import Any, Mapping
 import duckdb
 
 from .core import normalize_json, sha256_file
-from .engine import analyze_file, pool_results, runtime_provenance
+from .engine import analyze_file
 from .recovery import (
     DUCKDB_MEMORY_LIMIT,
     DUCKDB_THREADS,
+    IP002RClosedError,
+    IP_002R_CLOSED_MESSAGE,
     MAX_RSS_BYTES,
     MAX_TEMP_BYTES,
     SHARD_ALGORITHM,
@@ -30,12 +32,10 @@ from .recovery import (
     _sql_path,
     _utc_now,
     reduce_checkpoints,
-    select_august_sample,
     verify_checkpoint,
     verify_partition,
     verify_preserved_evidence,
 )
-from .report import render_report, write_report
 
 
 JUNE_VALIDATION_SHARDS = 1024
@@ -450,83 +450,9 @@ def complete_recovery(
     repository: Path,
     offline_test_result: str,
 ) -> dict[str, Any]:
-    runtime = runtime_provenance(repository)
-    if runtime["git"]["dirty"]:
-        raise RuntimeError("recovery completion requires clean committed code")
-    evidence = verify_preserved_evidence(original_output)
-    sample = select_august_sample(original_output)
-    pilot = _validated_pilot(recovery_root, str(sample["sha256"]))
-    manifest_path = _partition_manifest_path(recovery_root, 32)
-    manifest = verify_partition(manifest_path, str(sample["sha256"]))
-    completion_started = time.perf_counter()
-    _run_remaining_shards(
-        original_output=original_output,
-        recovery_root=recovery_root,
-        repository=repository,
-        sample=sample,
-        manifest=manifest,
-    )
-    august, recovery_metrics = _reduce_august(
-        recovery_root=recovery_root,
-        sample=sample,
-        manifest=manifest,
-        pilot=pilot,
-        repository=repository,
-    )
-    june_validation = validate_june_equivalence(
-        original_output=original_output, recovery_root=recovery_root
-    )
-    recovery_metrics = {
-        **recovery_metrics,
-        "final_recovery_storage_bytes": _directory_size(recovery_root),
-    }
-    original_analysis = _read_json(original_output / "analysis-a1-a8.json")
-    if len(original_analysis.get("samples", [])) != 1:
-        raise RuntimeError("preserved original analysis no longer contains exactly June")
-    june = original_analysis["samples"][0]
-    if june.get("actual_hour") != "2026-06-15T12":
-        raise RuntimeError("preserved successful original-engine sample is not June")
-    preliminary_rationale = (
-        "A9 is intentionally pending until the raw June and August A1-A8 values are "
-        "reviewed; no post-hoc numerical threshold is introduced."
-    )
-    pooled = pool_results(
-        [june, august],
-        feasibility_label="UNRESOLVED",
-        feasibility_rationale=preliminary_rationale,
-    )
-    combined = {
-        "status": "A1_A8_COMPLETE_A9_PENDING",
-        "run": {
-            "started_at": original_analysis["run"]["started_at"],
-            "ended_at": _utc_now(),
-            "runtime": runtime,
-            "offline_test_command": "python -m unittest discover -s tests/probes -p 'test_*.py' -v",
-            "offline_test_result": offline_test_result,
-            "summary_path": str((recovery_root / "final-summary.json").resolve()),
-        },
-        "download": original_analysis["download"],
-        "samples": [june, august],
-        "failures": original_analysis["failures"],
-        "pooled": pooled,
-        "deviation_from_ip_002": "None",
-        "deviation_from_ip_002r": "None",
-        "recovery": {
-            "original_ip_002": {
-                "implementation_commit": "b07f599dd22e2dfce95cbab14ca8e342a8dc903a",
-                "result_sha256": evidence["first_analysis_sha256"],
-                "status": evidence["first_analysis_status"],
-                "successful_sample": "2026-06-15T12",
-                "failed_samples": ["2026-05-01T12", "2026-08-01T12"],
-            },
-            "ip_002r_pilot": pilot,
-            "august_recovery": recovery_metrics,
-            "june_equivalence": june_validation,
-            "completion_phase_wall_seconds": time.perf_counter() - completion_started,
-        },
-        "safety": original_analysis.get("safety", {}),
-    }
-    return _immutable_json(recovery_root / "combined-a1-a8-pre-a9.json", combined)
+    """Reject the obsolete completion path before any shard can be launched."""
+
+    raise IP002RClosedError(IP_002R_CLOSED_MESSAGE)
 
 
 def finalize_recovery(
@@ -538,34 +464,6 @@ def finalize_recovery(
     feasibility_rationale: str,
     final_test_result: str,
 ) -> dict[str, Any]:
-    preliminary = _read_json(recovery_root / "combined-a1-a8-pre-a9.json")
-    runtime = runtime_provenance(repository)
-    if runtime["git"]["dirty"]:
-        raise RuntimeError("finalization requires clean committed code before report output")
-    pooled = pool_results(
-        preliminary["samples"],
-        feasibility_label=feasibility_label,
-        feasibility_rationale=feasibility_rationale,
-    )
-    final = {
-        **preliminary,
-        "status": "COMPLETE",
-        "pooled": pooled,
-        "run": {
-            **preliminary["run"],
-            "ended_at": _utc_now(),
-            "runtime": runtime,
-            "offline_test_result": final_test_result,
-        },
-    }
-    summary_path = recovery_root / "final-summary.json"
-    final = _immutable_json(summary_path, final)
-    summary_hash = sha256_file(summary_path)
-    write_report(report_path, render_report(final, summary_sha256=summary_hash))
-    return {
-        "summary_path": str(summary_path.resolve()),
-        "summary_sha256": summary_hash,
-        "report_path": str(report_path.resolve()),
-        "report_sha256": sha256_file(report_path),
-        "a9": final["pooled"]["a9"],
-    }
+    """Reject obsolete A9/report finalization for the closed recovery attempt."""
+
+    raise IP002RClosedError(IP_002R_CLOSED_MESSAGE)
